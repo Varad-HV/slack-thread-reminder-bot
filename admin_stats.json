@@ -1,0 +1,32 @@
+{
+  "reminders_created": 11,
+  "reports": [
+    {
+      "type": "INVALID_TICKET",
+      "reminder_id": "f3fe0979-33d5-4692-8b95-b940355663c5",
+      "reporter": "U07FPT7RN7K",
+      "created_by": "U07FPT7RN7K",
+      "ticket": "tesst",
+      "timestamp": "2026-01-27T20:03:06.645Z"
+    },
+    {
+      "type": "INVALID_TICKET",
+      "reminder_id": "f3fe0979-33d5-4692-8b95-b940355663c5",
+      "reporter": "U07FPT7RN7K",
+      "created_by": "U07FPT7RN7K",
+      "ticket": "tesst",
+      "timestamp": "2026-01-27T20:03:46.033Z"
+    },
+    {
+      "type": "SPAM",
+      "reminder_id": "78e1a1f3-c06e-4099-b1f0-eb6e33ef361b",
+      "reporter": "U07FPT7RN7K",
+      "created_by": "U07FPT7RN7K",
+      "ticket": "update sdk version",
+      "timestamp": "2026-01-27T20:38:32.384Z"
+    }
+  ],
+  "channels_used": [
+    "CUWPAUQRG"
+  ]
+}

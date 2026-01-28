@@ -1,0 +1,15 @@
+.env
+.env.local
+.env.*.local
+node_modules/
+*.log
+reminders_db.json.bak*
+admin_stats.json.bak*
+.DS_Store
+.vscode/
+*.swp
+*.swo
+*~
+.idea/
+dist/
+build/
