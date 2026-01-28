@@ -35,39 +35,21 @@ Railway will start the initial build, but it might fail or not work correctly ye
 | `SLACK_SIGNING_SECRET` | Your App's Signing Secret |
 | `ADMIN_USER_ID` | Your Slack User ID (e.g., `U12345678`) for admin alerts |
 | `NODE_ENV` | Set this to `production` |
-| `DATA_PATH` | Set this to `/app/data` (We will create this volume next) |
+| `MONGODB_URI` | Your MongoDB Connection String |
 | `PORT` | Set this to `3000` (Optional, but good practice) |
 
 ---
 
-## Step 3: Set Up Persistence (Volumes)
-
-Since your bot saves reminders to a JSON file (`reminders_db.json`), you need a persistent storage volume. Without this, every time you redeploy, your database would be wiped!
-
-1.  In your Railway project, go to the **Settings** tab.
-2.  Scroll down to the **Service** section (or look for **Volumes**).
-3.  Click **+ Add Volume**.
-4.  Mount Path: `/app/data`
-5.  Click **Add**.
-
-**Why this matters:**
-- We set `DATA_PATH` to `/app/data` in the variables.
-- We mounted a volume at `/app/data`.
-- The code checks `process.env.DATA_PATH` to decide where to save the DB files.
-- Now, your `reminders_db.json` and `admin_stats.json` will be saved in this persistent volume and survive restarts/redeploys.
-
----
-
-## Step 4: Verify Deployment
+## Step 3: Verify Deployment
 
 1.  Once variables and volumes are set, Railway usually triggers a redeploy automatically. If not, go to the **Deployments** tab and click **Redeploy**.
 2.  Wait for the build to finish and the status to turn **Active** (Green).
 3.  Click on the **Logs** tab to see the live output.
-4.  You should see: `Jira Follow-up Bot is Live!` and `Health check running on port 3000`.
+4.  You should see: `Connected to MongoDB` and `Jira Follow-up Bot is Live!`.
 
 ---
 
-## Step 5: Test Your Bot
+## Step 4: Test Your Bot
 
 1.  Go to your Slack workspace.
 2.  Mention the bot or use a shortcut to create a reminder.
@@ -77,7 +59,7 @@ Since your bot saves reminders to a JSON file (`reminders_db.json`), you need a 
 
 -   **"Channel not found" error**: Ensure the bot is invited to the channel where you are trying to use it (`/invite @YourBotName`).
 -   **Bot not responding**: Check if Socket Mode is enabled in your Slack App configuration (under "Socket Mode" in the left sidebar).
--   **Database not saving**: Double-check that the Volume Mount Path matches the `DATA_PATH` variable exactly (`/app/data`).
+-   **Database Error**: Check that your `MONGODB_URI` is correct and your IP is allowed in MongoDB Atlas "Network Access" (set to `0.0.0.0/0`).
 
 ---
 

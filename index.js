@@ -2,82 +2,107 @@ require('dotenv').config();
 const { App } = require('@slack/bolt');
 const cron = require('node-cron');
 const { v4: uuidv4 } = require('uuid');
-const fs = require('fs');
+const mongoose = require('mongoose');
 
 // ---------------------------
 // 1. Persistence & Database
 // ---------------------------
-const DB_FILE = process.env.DATA_PATH ? `${process.env.DATA_PATH}/reminders_db.json` : './reminders_db.json';
-const saveToDb = (data) => {
-    // Atomic write: write to tmp then rename
+const ReminderSchema = new mongoose.Schema({
+    id: { type: String, unique: true },
+    channel: String,
+    thread_ts: String,
+    assignee: String,
+    assigneeName: String,
+    created_by: String,
+    creatorName: String,
+    created_at: Date,
+    frequencyMinutes: Number,
+    priority: String,
+    note: String,
+    jira: String,
+    status: String,
+    pingCount: Number,
+    dailyPingCount: Number,
+    active: Boolean,
+    lastSent: Date,
+    eta: String,
+    etaNotified: Boolean,
+    blockerReason: String,
+    resolved_at: Date
+});
+const ReminderModel = mongoose.model('Reminder', ReminderSchema);
+
+const ReportSchema = new mongoose.Schema({
+    type: String,
+    reminder_id: String,
+    reporter: String,
+    created_by: String,
+    ticket: String,
+    timestamp: Date
+});
+const ReportModel = mongoose.model('Report', ReportSchema);
+
+const GlobalStatsSchema = new mongoose.Schema({
+    key: { type: String, default: 'main' },
+    reminders_created: { type: Number, default: 0 },
+    channels_used: [String]
+});
+const GlobalStatsModel = mongoose.model('GlobalStats', GlobalStatsSchema);
+
+// --- In-Memory Cache (Synced with DB) ---
+let reminders = [];
+let adminStatsCache = { reminders_created: 0, reports: [], channels_used: [] };
+
+// --- DB Functions ---
+const saveToDb = async (allReminders) => {
+    // Fire and forget sync to MongoDB
     try {
-        const tmp = DB_FILE + '.tmp';
-        fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
-        fs.renameSync(tmp, DB_FILE);
+        const ops = allReminders.map(r => ({
+            updateOne: {
+                filter: { id: r.id },
+                update: { $set: r },
+                upsert: true
+            }
+        }));
+        // Also handle deletions (items in DB but not in memory)
+        const currentIds = allReminders.map(r => r.id);
+        await ReminderModel.deleteMany({ id: { $nin: currentIds } });
+        if (ops.length > 0) await ReminderModel.bulkWrite(ops);
     } catch (e) {
         console.error('❌ DB Save Error:', e);
     }
 };
 
-const loadFromDb = () => {
+const saveReport = async (report) => {
     try {
-        if (!fs.existsSync(DB_FILE)) return [];
-        const raw = fs.readFileSync(DB_FILE, 'utf8');
-        // Validate JSON safely
-        let data;
-        try {
-            data = JSON.parse(raw);
-        } catch (e) {
-            console.error('⚠️ DB Load Error: invalid JSON, ignoring file and starting fresh.', e);
-            return [];
-        }
-        if (!Array.isArray(data)) {
-            console.error('⚠️ DB Load Error: expected array in DB file, starting fresh.');
-            return [];
-        }
-        // Reset lastSent ONLY for truly active reminders to prevent startup spam
-        // Don't touch BLOCKED/RESOLVED/WAITING_ON_SA reminders - preserve their state
-        data.forEach(r => {
-            if (r.active && r.status === 'ACTIVE') {
-                r.lastSent = new Date();
-                r.dailyPingCount = 0;
-            }
-        });
-        return data;
-    } catch (e) {
-        console.error('⚠️ DB Load Error:', e);
-    }
-    return [];
-};
-
-const ADMIN_DB_FILE = './admin_stats.json';
-const saveReport = (report) => {
-    try {
-        let stats = { reminders_created: 0, reports: [], channels_used: [] };
-        if (fs.existsSync(ADMIN_DB_FILE)) {
-            try {
-                const data = JSON.parse(fs.readFileSync(ADMIN_DB_FILE, 'utf8'));
-                stats = data || stats;
-            } catch (e) {
-                console.error('Admin stats file corrupt, recreating.', e);
-            }
-        }
-        stats.reports = stats.reports || [];
-        stats.reports.push(report);
-        // atomic write
-        const tmp = ADMIN_DB_FILE + '.tmp';
-        fs.writeFileSync(tmp, JSON.stringify(stats, null, 2));
-        fs.renameSync(tmp, ADMIN_DB_FILE);
+        // Update memory
+        adminStatsCache.reports.push(report);
+        // Save to DB
+        await new ReportModel(report).save();
     } catch (e) { console.error('Report Save Error:', e); }
 };
 
-const getAdminStats = () => {
-    try { if (fs.existsSync(ADMIN_DB_FILE)) return JSON.parse(fs.readFileSync(ADMIN_DB_FILE)); } 
-    catch (e) { console.error("Stats Load Error:", e); }
-    return { reminders_created: 0, reports: [], channels_used: [], assignee_metrics: {} };
+const updateGlobalStats = async (channel) => {
+    try {
+        adminStatsCache.reminders_created++;
+        if (!adminStatsCache.channels_used.includes(channel)) {
+            adminStatsCache.channels_used.push(channel);
+        }
+        await GlobalStatsModel.findOneAndUpdate(
+            { key: 'main' },
+            { 
+                $inc: { reminders_created: 1 },
+                $addToSet: { channels_used: channel }
+            },
+            { upsert: true }
+        );
+    } catch (e) { console.error('Stats Save Error:', e); }
 };
 
-let reminders = loadFromDb();
+const getAdminStats = () => {
+    // Return in-memory cache (synchronous to match original signature)
+    return adminStatsCache;
+};
 
 const ADMIN_USER_ID = process.env.ADMIN_USER_ID || 'U123'; // Set in .env 
 // Enforce working hours in production; removed BYPASS_WORKING_HOURS override
@@ -617,6 +642,8 @@ app.view('create_reminder', async ({ ack, body, view, client }) => {
   } catch (e) {
       console.error('Could not write admin stats atomically:', e);
   }
+  // Save to admin stats (Async update)
+  updateGlobalStats(metadata.channel);
 
   // Education message - engaging with personality
   await client.chat.postMessage({
@@ -1255,15 +1282,45 @@ healthApp.listen(PORT, () => {
   console.log(`Health check running on port ${PORT}`);
 });
 
+// --- Initialization & Startup ---
 (async () => {
-  // Start the app (Socket Mode doesn't need a specific port, but we avoid the env.PORT to prevent conflict with Express)
-  await app.start();
-  console.log('Jira Follow-up Bot is Live!');
-    // Production safety: attach global error handlers
-    process.on('uncaughtException', (err) => {
-        console.error('Uncaught Exception:', err);
-    });
-    process.on('unhandledRejection', (reason) => {
-        console.error('Unhandled Rejection:', reason);
-    });
+    try {
+        // 1. Connect to MongoDB
+        if (!process.env.MONGODB_URI) {
+            console.error('❌ MONGODB_URI is missing in .env!');
+            process.exit(1);
+        }
+        await mongoose.connect(process.env.MONGODB_URI);
+        console.log('✅ Connected to MongoDB');
+
+        // 2. Load Data into Memory
+        const dbReminders = await ReminderModel.find({});
+        reminders = dbReminders.map(r => r.toObject());
+        
+        // Reset active pings on startup to prevent spam
+        reminders.forEach(r => {
+            if (r.active && r.status === 'ACTIVE') {
+                r.lastSent = new Date();
+                r.dailyPingCount = 0;
+            }
+        });
+
+        // Load Stats
+        const globalStats = await GlobalStatsModel.findOne({ key: 'main' }) || { reminders_created: 0, channels_used: [] };
+        const reports = await ReportModel.find({});
+        adminStatsCache = {
+            reminders_created: globalStats.reminders_created,
+            channels_used: globalStats.channels_used,
+            reports: reports.map(r => r.toObject())
+        };
+        console.log(`✅ Loaded ${reminders.length} reminders and ${reports.length} reports.`);
+
+        // 3. Start Slack App
+        await app.start();
+        console.log('🚀 Jira Follow-up Bot is Live!');
+        
+    } catch (e) {
+        console.error('❌ Startup Error:', e);
+        process.exit(1);
+    }
 })();
