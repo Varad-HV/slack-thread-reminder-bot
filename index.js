@@ -1256,7 +1256,8 @@ healthApp.listen(PORT, () => {
 });
 
 (async () => {
-  await app.start(process.env.PORT || 3001);
+  // Start the app (Socket Mode doesn't need a specific port, but we avoid the env.PORT to prevent conflict with Express)
+  await app.start();
   console.log('Jira Follow-up Bot is Live!');
     // Production safety: attach global error handlers
     process.on('uncaughtException', (err) => {
