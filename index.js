@@ -1271,17 +1271,6 @@ app.view('submit_report', async ({ ack, body, view, client }) => {
     });
 });
 
-// Health check endpoint for uptime monitoring
-const express = require('express');
-const healthApp = express();
-healthApp.get('/health', (req, res) => {
-  res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
-});
-const PORT = process.env.PORT || 3000;
-healthApp.listen(PORT, () => {
-  console.log(`Health check running on port ${PORT}`);
-});
-
 // --- Initialization & Startup ---
 (async () => {
     try {
