@@ -3,6 +3,19 @@ const { App } = require('@slack/bolt');
 const cron = require('node-cron');
 const { v4: uuidv4 } = require('uuid');
 const mongoose = require('mongoose');
+const http = require('http'); // Added for Render Free Tier workaround
+
+// --- Render Web Service Workaround ---
+// Render expects a web service to bind to a port.
+const PORT = process.env.PORT || 3000;
+const server = http.createServer((req, res) => {
+    res.writeHead(200);
+    res.end('Slack Bot is Alive! 🤖');
+});
+server.listen(PORT, () => {
+    console.log(`✅ Dummy server listening on port ${PORT} for Render health checks.`);
+});
+
 
 // ---------------------------
 // 1. Persistence & Database
