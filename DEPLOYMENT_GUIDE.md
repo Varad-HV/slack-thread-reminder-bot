@@ -35,7 +35,7 @@ In the same setup screen, scroll down to the **Environment Variables** section a
 | `SLACK_SIGNING_SECRET` | Your App's Signing Secret |
 | `ADMIN_USER_ID` | Your Slack User ID (e.g., `U12345678`) for admin features |
 | `NODE_ENV` | Set this to `production` |
-| `MONGODB_URI` | Your MongoDB Connection String |
+| `MONGODB_URI` | **REQUIRED:** Your MongoDB Connection String |
 
 ---
 
@@ -44,6 +44,23 @@ In the same setup screen, scroll down to the **Environment Variables** section a
 1.  Click **Create Background Worker**.
 2.  Wait for the build to finish.
 3.  Go to the **Logs** tab and watch for the startup messages: `✅ Connected to MongoDB` and `🚀 Jira Follow-up Bot is Live!`.
+
+---
+
+## 🛠️ Migrating Legacy Data (JSON to MongoDB)
+
+If you have existing reminders in a local `reminders_db.json` file (or backup), you can migrate them to MongoDB.
+
+1.  **Get your MongoDB Connection String** (the same one you used for Render).
+2.  **Add it to your local `.env` file**:
+    ```env
+    MONGODB_URI=mongodb+srv://user:pass@cluster.mongodb.net/my-db?retryWrites=true&w=majority
+    ```
+3.  **Run the migration script**:
+    ```bash
+    node src/scripts/migrate_json_to_mongo.js
+    ```
+4.  This will read your backup file and upload all reminders to the database.
 
 ---
 

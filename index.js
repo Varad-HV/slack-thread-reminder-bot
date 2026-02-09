@@ -90,7 +90,7 @@ const updateGlobalStats = async (channel) => {
         }
         await GlobalStatsModel.findOneAndUpdate(
             { key: 'main' },
-            { 
+            {
                 $inc: { reminders_created: 1 },
                 $addToSet: { channels_used: channel }
             },
@@ -114,10 +114,10 @@ const WORKING_HOURS = { start: 9, end: 18 };
 const WORKING_DAYS = [1, 2, 3, 4, 5];
 
 const app = new App({
-  token: process.env.SLACK_BOT_TOKEN,
-  signingSecret: process.env.SLACK_SIGNING_SECRET,
-  socketMode: true,
-  appToken: process.env.SLACK_APP_TOKEN
+    token: process.env.SLACK_BOT_TOKEN,
+    signingSecret: process.env.SLACK_SIGNING_SECRET,
+    socketMode: true,
+    appToken: process.env.SLACK_APP_TOKEN
 });
 
 // ---------------------------
@@ -127,12 +127,12 @@ const app = new App({
 const getThreadLink = (channel, ts) => `https://slack.com/archives/${channel}/p${ts.replace('.', '')}`;
 
 const getStartupGreeting = (user) => {
-  const hour = new Date().getHours();
-  let greet = "Ready to crush it?";
-  if (hour < 12) greet = "Morning caffeine kick! ☕";
-  else if (hour >= 12 && hour <= 14) greet = "Hope lunch was great! 🥗";
-  else greet = "Evening vibes. 🌅";
-  return `${greet} <@${user}>,`;
+    const hour = new Date().getHours();
+    let greet = "Ready to crush it?";
+    if (hour < 12) greet = "Morning caffeine kick! ☕";
+    else if (hour >= 12 && hour <= 14) greet = "Hope lunch was great! 🥗";
+    else greet = "Evening vibes. 🌅";
+    return `${greet} <@${user}>,`;
 };
 
 /**
@@ -259,55 +259,59 @@ const sendDashboardAndCSV = async (userId, offsetMs = 0) => {
 
 const sendAdminDashboard = async () => {
     if (!ADMIN_USER_ID || ADMIN_USER_ID === 'U123') return; // Skip if not configured
-    
+
     try {
         const stats = getAdminStats();
         const activeCount = reminders.filter(r => r.active && r.status === 'ACTIVE').length;
         const resolvedCount = reminders.filter(r => r.status === 'RESOLVED').length;
         const blockedCount = reminders.filter(r => r.status === 'BLOCKED').length;
         const waitingCount = reminders.filter(r => r.status === 'WAITING_ON_SA').length;
-        
+
         // Calculate metrics
         const metrics = calculateMetrics();
         const escalations = findEscalationCandidates();
         const reportAnalytics = analyzeReports(stats);
-        
+
         // Beautiful formatted blocks
         const blocks = [
             { type: "header", text: { type: "plain_text", text: "📊 Admin Dashboard" } },
-            
+
             // Quick Stats Section
             { type: "section", text: { type: "mrkdwn", text: "*📈 Quick Stats*" } },
-            { type: "section", fields: [
-                { type: "mrkdwn", text: `*Total Reminders*\n${reminders.length}` },
-                { type: "mrkdwn", text: `*Active*\n${activeCount}` },
-                { type: "mrkdwn", text: `*Resolved* ✅\n${resolvedCount}` },
-                { type: "mrkdwn", text: `*Blocked* 🔴\n${blockedCount}` }
-            ]},
-            
+            {
+                type: "section", fields: [
+                    { type: "mrkdwn", text: `*Total Reminders*\n${reminders.length}` },
+                    { type: "mrkdwn", text: `*Active*\n${activeCount}` },
+                    { type: "mrkdwn", text: `*Resolved* ✅\n${resolvedCount}` },
+                    { type: "mrkdwn", text: `*Blocked* 🔴\n${blockedCount}` }
+                ]
+            },
+
             { type: "divider" },
-            
+
             // Efficiency Metrics
             { type: "section", text: { type: "mrkdwn", text: "*⚡ Team Performance*" } },
-            { type: "section", fields: [
-                { type: "mrkdwn", text: `*Completion Rate*\n${metrics.completionRate}%` },
-                { type: "mrkdwn", text: `*Avg Resolution*\n${metrics.avgResolutionDays.toFixed(1)} days` },
-                { type: "mrkdwn", text: `*Avg Pings/Task*\n${metrics.avgPingsPerTask.toFixed(1)}` },
-                { type: "mrkdwn", text: `*Waiting on SA*\n${waitingCount}` }
-            ]},
-            
+            {
+                type: "section", fields: [
+                    { type: "mrkdwn", text: `*Completion Rate*\n${metrics.completionRate}%` },
+                    { type: "mrkdwn", text: `*Avg Resolution*\n${metrics.avgResolutionDays.toFixed(1)} days` },
+                    { type: "mrkdwn", text: `*Avg Pings/Task*\n${metrics.avgPingsPerTask.toFixed(1)}` },
+                    { type: "mrkdwn", text: `*Waiting on SA*\n${waitingCount}` }
+                ]
+            },
+
             { type: "divider" },
-            
+
             // Top Performers
             { type: "section", text: { type: "mrkdwn", text: "*🏆 Top Performers*" } }
         ];
-        
+
         // Top assignees
         const topAssignees = Object.entries(metrics.assigneeMetrics)
             .filter(([_, data]) => data.completed > 0) // Only show those with completions
             .sort((a, b) => b[1].efficiencyScore - a[1].efficiencyScore)
             .slice(0, 3);
-        
+
         if (topAssignees.length > 0) {
             topAssignees.forEach(([assignee, data]) => {
                 const stars = '⭐'.repeat(Math.round(data.efficiencyScore));
@@ -319,7 +323,7 @@ const sendAdminDashboard = async () => {
         } else {
             blocks.push({ type: "section", text: { type: "mrkdwn", text: "No completed tasks yet to rank." } });
         }
-        
+
         // Escalations - only show real ones (15+ pings)
         if (escalations.length > 0) {
             blocks.push({ type: "divider" });
@@ -335,7 +339,7 @@ const sendAdminDashboard = async () => {
             blocks.push({ type: "divider" });
             blocks.push({ type: "section", text: { type: "mrkdwn", text: "*✅ No tickets needing attention*\nAll reminders are on track!" } });
         }
-        
+
         // Report breakdown
         if (reportAnalytics.byReason.length > 0) {
             blocks.push({ type: "divider" });
@@ -348,7 +352,7 @@ const sendAdminDashboard = async () => {
                 text: { type: "mrkdwn", text: reportText }
             });
         }
-        
+
         // Recommendations
         const recommendations = generateRecommendations(metrics, escalations, reportAnalytics);
         if (recommendations && recommendations !== "✅ Everything looks good!") {
@@ -356,7 +360,7 @@ const sendAdminDashboard = async () => {
             blocks.push({ type: "section", text: { type: "mrkdwn", text: "*💡 Recommendations*" } });
             blocks.push({ type: "section", text: { type: "mrkdwn", text: recommendations } });
         }
-        
+
         // Open DM(s) and send with staggering to avoid rate limits
         const recipients = [ADMIN_USER_ID].filter(Boolean);
         const csvContent = generateAdminCSV(metrics, escalations);
@@ -379,7 +383,7 @@ const sendAdminDashboard = async () => {
                 }
             }, delay);
         });
-    } catch (e) { 
+    } catch (e) {
         // Specific error handling for common issues
         if (e.data?.error === 'channel_not_found') {
             console.error("⚠️ Cannot send admin dashboard: ADMIN_USER_ID not found. Check .env file");
@@ -397,7 +401,7 @@ const sendAdminDashboard = async () => {
 const calculateMetrics = () => {
     const resolved = reminders.filter(r => r.status === 'RESOLVED');
     const assigneeMetrics = {};
-    
+
     reminders.forEach(r => {
         if (!assigneeMetrics[r.assignee]) {
             assigneeMetrics[r.assignee] = {
@@ -410,7 +414,7 @@ const calculateMetrics = () => {
                 efficiencyScore: 0
             };
         }
-        
+
         if (r.active) assigneeMetrics[r.assignee].active++;
         if (r.status === 'RESOLVED') {
             assigneeMetrics[r.assignee].completed++;
@@ -419,7 +423,7 @@ const calculateMetrics = () => {
             assigneeMetrics[r.assignee].totalPings += r.pingCount;
         }
     });
-    
+
     // Calculate averages and efficiency scores
     Object.entries(assigneeMetrics).forEach(([_, data]) => {
         if (data.completed > 0) {
@@ -429,14 +433,14 @@ const calculateMetrics = () => {
             data.efficiencyScore = Math.max(1, 5 - (data.avgResolutionTime / 2) - (data.avgPingsPerTask / 5));
         }
     });
-    
+
     const totalResolved = resolved.length;
-    const avgResolutionDays = totalResolved > 0 
-        ? resolved.reduce((sum, r) => sum + (new Date(r.resolved_at || new Date()) - new Date(r.created_at)) / (1000 * 60 * 60 * 24), 0) / totalResolved 
+    const avgResolutionDays = totalResolved > 0
+        ? resolved.reduce((sum, r) => sum + (new Date(r.resolved_at || new Date()) - new Date(r.created_at)) / (1000 * 60 * 60 * 24), 0) / totalResolved
         : 0;
     const avgPingsPerTask = totalResolved > 0 ? resolved.reduce((sum, r) => sum + r.pingCount, 0) / totalResolved : 0;
     const completionRate = reminders.length > 0 ? Math.round((totalResolved / reminders.length) * 100) : 0;
-    
+
     return {
         assigneeMetrics,
         avgResolutionDays,
@@ -453,13 +457,13 @@ const findEscalationCandidates = () => {
     return reminders.filter(r => {
         // Skip resolved or non-active reminders
         if (r.status === 'RESOLVED' || !r.active) return false;
-        
+
         // Only show reminders with actual escalation (15+ pings)
         const isPingEscalation = r.pingCount >= ESCALATION_PING_THRESHOLD;
-        
+
         // Or blocked for >24 hours
         const isBlockedLong = r.status === 'BLOCKED' && (new Date() - new Date(r.created_at)) / (1000 * 60 * 60) > 24;
-        
+
         return isPingEscalation || isBlockedLong;
     }).sort((a, b) => b.pingCount - a.pingCount);
 };
@@ -471,11 +475,11 @@ const analyzeReports = (stats) => {
     const reports = stats.reports || [];
     const reasonCounts = {};
     let total = reports.length;
-    
+
     reports.forEach(r => {
         reasonCounts[r.type] = (reasonCounts[r.type] || 0) + 1;
     });
-    
+
     const byReason = Object.entries(reasonCounts)
         .map(([reason, count]) => ({
             reason,
@@ -483,7 +487,7 @@ const analyzeReports = (stats) => {
             percentage: total > 0 ? Math.round((count / total) * 100) : 0
         }))
         .sort((a, b) => b.count - a.count);
-    
+
     return { byReason, total };
 };
 
@@ -492,30 +496,30 @@ const analyzeReports = (stats) => {
  */
 const generateRecommendations = (metrics, escalations, reportAnalytics) => {
     const recommendations = [];
-    
+
     if (escalations.length > 0) {
         recommendations.push(`🚨 ${escalations.length} ticket(s) at risk - consider manual intervention or re-prioritization`);
     }
-    
+
     if (reportAnalytics.byReason[0]) {
         const topIssue = reportAnalytics.byReason[0];
         recommendations.push(`📌 Most common issue: ${topIssue.reason} (${topIssue.count} reports) - may indicate process problem`);
     }
-    
+
     const poorPerformers = Object.entries(metrics.assigneeMetrics)
         .filter(([_, data]) => data.completed > 0 && data.avgPingsPerTask > 10)
         .map(([assignee]) => `<@${assignee}>`)
         .slice(0, 2);
-    
+
     if (poorPerformers.length > 0) {
         recommendations.push(`💡 Check in with ${poorPerformers.join(', ')} - might need support or clarity`);
     }
-    
+
     if (metrics.completionRate < 50) {
         recommendations.push(`⏱️ Completion rate is ${metrics.completionRate}% - consider reviewing priority/scope`);
     }
-    
-    return recommendations.length > 0 ? recommendations.map((r, i) => `${i+1}. ${r}`).join('\n') : "✅ Everything looks good!";
+
+    return recommendations.length > 0 ? recommendations.map((r, i) => `${i + 1}. ${r}`).join('\n') : "✅ Everything looks good!";
 };
 
 /**
@@ -524,15 +528,15 @@ const generateRecommendations = (metrics, escalations, reportAnalytics) => {
 const generateAdminCSV = (metrics, escalations) => {
     const escalationIds = new Set(escalations.map(r => r.id));
     let csv = "Ticket,Assignee,Reporter,Status,Pings,Priority,Created,Resolution Days,Channel,Thread Link,Blocker Reason,Escalated,Assignee Efficiency,Jira\n";
-    
+
     reminders.forEach(r => {
         const assigneeData = metrics.assigneeMetrics[r.assignee];
-        const resolutionDays = r.status === 'RESOLVED' 
+        const resolutionDays = r.status === 'RESOLVED'
             ? ((new Date(r.resolved_at || new Date()) - new Date(r.created_at)) / (1000 * 60 * 60 * 24)).toFixed(1)
             : 'Active';
         const efficiency = assigneeData ? assigneeData.efficiencyScore.toFixed(1) : 'N/A';
         const isEscalated = escalationIds.has(r.id) ? 'YES' : 'NO';
-        
+
         const row = [
             `"${r.note.replace(/"/g, '""')}"`,
             `"${r.assigneeName}"`,
@@ -551,7 +555,7 @@ const generateAdminCSV = (metrics, escalations) => {
         ];
         csv += row.join(",") + "\n";
     });
-    
+
     return csv;
 };
 
@@ -560,123 +564,115 @@ const generateAdminCSV = (metrics, escalations) => {
 // ---------------------------
 
 app.shortcut('set_thread_reminder', async ({ shortcut, ack, client }) => {
-  await ack();
-  const channel = (shortcut.channel?.id || shortcut.message?.channel?.id);
-  const thread_ts = (shortcut.message?.ts || shortcut.shortcut_ts);
+    await ack();
+    const channel = (shortcut.channel?.id || shortcut.message?.channel?.id);
+    const thread_ts = (shortcut.message?.ts || shortcut.shortcut_ts);
 
-  await client.views.open({
-    trigger_id: shortcut.trigger_id,
-    view: {
-      type: 'modal',
-      callback_id: 'create_reminder',
-      private_metadata: JSON.stringify({ channel, thread_ts }),
-      title: { type: 'plain_text', text: 'Jira Follow-up' },
-      submit: { type: 'plain_text', text: 'Launch' },
-      blocks: [
-        { type: 'input', block_id: 'assignee_block', element: { type: 'users_select', action_id: 'assignee' }, label: { type: 'plain_text', text: 'Assignee' } },
-        { type: 'input', block_id: 'priority_block', element: { type: 'static_select', action_id: 'priority', options: [
-            { text: { type: 'plain_text', text: '🔴 Critical - Every 2 hours' }, value: 'Critical' },
-            { text: { type: 'plain_text', text: '🟠 High - Every 6 hours' }, value: 'High' },
-            { text: { type: 'plain_text', text: '🟡 Medium - Daily morning' }, value: 'Medium' },
-            { text: { type: 'plain_text', text: '🟢 Low - Every 2 days' }, value: 'Low' }
-        ] }, label: { type: 'plain_text', text: 'Priority Level' } },
-        { type: 'input', block_id: 'note_block', element: { type: 'plain_text_input', action_id: 'note' }, label: { type: 'plain_text', text: 'Context/Goal' } },
-        { type: 'input', block_id: 'jira_block', element: { type: 'plain_text_input', action_id: 'jira' }, label: { type: 'plain_text', text: 'Jira URL' }, optional: true }
-      ]
-    }
-  });
+    await client.views.open({
+        trigger_id: shortcut.trigger_id,
+        view: {
+            type: 'modal',
+            callback_id: 'create_reminder',
+            private_metadata: JSON.stringify({ channel, thread_ts }),
+            title: { type: 'plain_text', text: 'Jira Follow-up' },
+            submit: { type: 'plain_text', text: 'Launch' },
+            blocks: [
+                { type: 'input', block_id: 'assignee_block', element: { type: 'users_select', action_id: 'assignee' }, label: { type: 'plain_text', text: 'Assignee' } },
+                {
+                    type: 'input', block_id: 'priority_block', element: {
+                        type: 'static_select', action_id: 'priority', options: [
+                            { text: { type: 'plain_text', text: '🔴 Critical - Every 2 hours' }, value: 'Critical' },
+                            { text: { type: 'plain_text', text: '🟠 High - Every 6 hours' }, value: 'High' },
+                            { text: { type: 'plain_text', text: '🟡 Medium - Daily morning' }, value: 'Medium' },
+                            { text: { type: 'plain_text', text: '🟢 Low - Every 2 days' }, value: 'Low' }
+                        ]
+                    }, label: { type: 'plain_text', text: 'Priority Level' }
+                },
+                { type: 'input', block_id: 'note_block', element: { type: 'plain_text_input', action_id: 'note' }, label: { type: 'plain_text', text: 'Context/Goal' } },
+                { type: 'input', block_id: 'jira_block', element: { type: 'plain_text_input', action_id: 'jira' }, label: { type: 'plain_text', text: 'Jira URL' }, optional: true }
+            ]
+        }
+    });
 });
 
 app.view('create_reminder', async ({ ack, body, view, client }) => {
-  await ack();
-  const metadata = JSON.parse(view.private_metadata);
-  const assigneeId = view.state.values.assignee_block.assignee.selected_user;
-  const [assigneeInfo, creatorInfo] = await Promise.all([
-    client.users.info({ user: assigneeId }),
-    client.users.info({ user: body.user.id })
-  ]);
+    await ack();
+    const metadata = JSON.parse(view.private_metadata);
+    const assigneeId = view.state.values.assignee_block.assignee.selected_user;
+    const [assigneeInfo, creatorInfo] = await Promise.all([
+        client.users.info({ user: assigneeId }),
+        client.users.info({ user: body.user.id })
+    ]);
 
-  const priority = view.state.values.priority_block.priority.selected_option.value;
-  let frequencyMinutes;
-  switch (priority) {
-    case 'Critical': frequencyMinutes = 120; break;
-    case 'High': frequencyMinutes = 360; break;
-    case 'Medium': frequencyMinutes = 1440; break;
-    case 'Low': frequencyMinutes = 2880; break;
-    default: frequencyMinutes = 1440;
-  }
+    const priority = view.state.values.priority_block.priority.selected_option.value;
+    let frequencyMinutes;
+    switch (priority) {
+        case 'Critical': frequencyMinutes = 120; break;
+        case 'High': frequencyMinutes = 360; break;
+        case 'Medium': frequencyMinutes = 1440; break;
+        case 'Low': frequencyMinutes = 2880; break;
+        default: frequencyMinutes = 1440;
+    }
 
-  const reminder = {
-    id: uuidv4(),
-    channel: metadata.channel,
-    thread_ts: metadata.thread_ts,
-    assignee: assigneeId,
-    assigneeName: assigneeInfo.user.real_name,
-    created_by: body.user.id,
-    creatorName: creatorInfo.user.real_name,
-    created_at: new Date(),
-    frequencyMinutes: frequencyMinutes,
-    priority: priority,
-    note: view.state.values.note_block.note.value,
-    jira: view.state.values.jira_block.jira?.value || '',
-    status: 'ACTIVE',
-    pingCount: 0,
-    dailyPingCount: 0,
-    active: true,
-    lastSent: new Date(),
-    etaNotified: false
-  };
+    const reminder = {
+        id: uuidv4(),
+        channel: metadata.channel,
+        thread_ts: metadata.thread_ts,
+        assignee: assigneeId,
+        assigneeName: assigneeInfo.user.real_name,
+        created_by: body.user.id,
+        creatorName: creatorInfo.user.real_name,
+        created_at: new Date(),
+        frequencyMinutes: frequencyMinutes,
+        priority: priority,
+        note: view.state.values.note_block.note.value,
+        jira: view.state.values.jira_block.jira?.value || '',
+        status: 'ACTIVE',
+        pingCount: 0,
+        dailyPingCount: 0,
+        active: true,
+        lastSent: new Date(),
+        etaNotified: false
+    };
 
-  reminders.push(reminder);
-  saveToDb(reminders);
+    reminders.push(reminder);
+    saveToDb(reminders);
 
-  // Save to admin stats
-  const stats = getAdminStats();
-  stats.reminders_created = (stats.reminders_created || 0) + 1;
-  if (!stats.channels_used) stats.channels_used = [];
-  if (!stats.channels_used.includes(metadata.channel)) stats.channels_used.push(metadata.channel);
-  try {
-      const tmp = ADMIN_DB_FILE + '.tmp';
-      fs.writeFileSync(tmp, JSON.stringify(stats, null, 2));
-      fs.renameSync(tmp, ADMIN_DB_FILE);
-  } catch (e) {
-      console.error('Could not write admin stats atomically:', e);
-  }
-  // Save to admin stats (Async update)
-  updateGlobalStats(metadata.channel);
+    // Update global stats in the database
+    updateGlobalStats(metadata.channel);
 
-  // Education message - engaging with personality
-  await client.chat.postMessage({
-    channel: reminder.channel,
-    thread_ts: reminder.thread_ts,
-    text: `Follow-up created`,
-    blocks: [
-      { type: "header", text: { type: "plain_text", text: "Follow-up Reminder Set ✨" } },
-      {
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text: `Hi <@${assigneeId}> 👋\n\nA reminder for this has been set by <@${body.user.id}>. We'll check in regularly to keep things moving.\n\nPro tip: Setting a target date means we'll stop bugging you until the final day. Smart move!`
-        }
-      },
-      { type: "divider" },
-      {
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text: "*What you can do:*\n✅ *Done* - Task complete\n🛑 *Blocked* - Hit a blocker? Pause reminders\n📅 *Target Date* - Tell us when you'll finish. We'll remind you 1 day before\n🚩 *Report* - Something's off? Flag it"
-        }
-      }
-    ]
-  });
+    // Education message - engaging with personality
+    await client.chat.postMessage({
+        channel: reminder.channel,
+        thread_ts: reminder.thread_ts,
+        text: `Follow-up created`,
+        blocks: [
+            { type: "header", text: { type: "plain_text", text: "Follow-up Reminder Set ✨" } },
+            {
+                type: "section",
+                text: {
+                    type: "mrkdwn",
+                    text: `Hi <@${assigneeId}> 👋\n\nA reminder for this has been set by <@${body.user.id}>. We'll check in regularly to keep things moving.\n\nPro tip: Setting a target date means we'll stop bugging you until the final day. Smart move!`
+                }
+            },
+            { type: "divider" },
+            {
+                type: "section",
+                text: {
+                    type: "mrkdwn",
+                    text: "*What you can do:*\n✅ *Done* - Task complete\n🛑 *Blocked* - Hit a blocker? Pause reminders\n📅 *Target Date* - Tell us when you'll finish. We'll remind you 1 day before\n🚩 *Report* - Something's off? Flag it"
+                }
+            }
+        ]
+    });
 
-  // Send the action card separately so assignee can interact
-  await client.chat.postMessage({
-    channel: reminder.channel,
-    thread_ts: reminder.thread_ts,
-    blocks: buildThreadBlock(reminder),
-    text: "Actions available"
-  });
+    // Send the action card separately so assignee can interact
+    await client.chat.postMessage({
+        channel: reminder.channel,
+        thread_ts: reminder.thread_ts,
+        blocks: buildThreadBlock(reminder),
+        text: "Actions available"
+    });
 
     // Removed automatic delayed personal dashboard send to avoid noisy behavior in production
 });
@@ -752,7 +748,7 @@ app.action('report_ticket', async ({ ack, body, action, client }) => {
     await ack();
     const r = reminders.find(rem => rem.id === action.value);
     if (!r || !r.active || r.status === 'RESOLVED') return;
-    
+
     await client.views.open({
         trigger_id: body.trigger_id,
         view: {
@@ -823,10 +819,10 @@ app.view('submit_eta', async ({ ack, body, view, client }) => {
         r.etaNotified = false;
         saveToDb(reminders);
         // Just show confirmation, not the action card
-        await client.chat.postMessage({ 
-            channel: r.channel, 
-            thread_ts: r.thread_ts, 
-            text: `Target date set to ${date}. No reminders until 1 day before.` 
+        await client.chat.postMessage({
+            channel: r.channel,
+            thread_ts: r.thread_ts,
+            text: `Target date set to ${date}. No reminders until 1 day before.`
         });
     }
 });
@@ -887,24 +883,26 @@ cron.schedule('* * * * *', async () => {
                 } else {
                     contextMsg = `${getStartupGreeting(target)} any progress? If you can, drop a target date so we can plan around it 📅`;
                 }
-                
+
                 await app.client.chat.postMessage({
                     channel: r.channel, thread_ts: r.thread_ts,
                     text: "Friendly Check-in",
                     blocks: [
                         { type: "section", text: { type: "mrkdwn", text: contextMsg } },
-                        { type: "actions", elements: [
-                            { type: "button", text: { type: "plain_text", text: "Done" }, action_id: "stop_reminder", value: r.id, style: "primary" },
-                            { type: "button", text: { type: "plain_text", text: "Blocked" }, action_id: "open_blocker_modal", value: r.id, style: "danger" },
-                            { type: "button", text: { type: "plain_text", text: "Target Date" }, action_id: "open_eta_modal", value: r.id },
-                            { type: "button", text: { type: "plain_text", text: "Report" }, action_id: "report_ticket", value: r.id }
-                        ]}
+                        {
+                            type: "actions", elements: [
+                                { type: "button", text: { type: "plain_text", text: "Done" }, action_id: "stop_reminder", value: r.id, style: "primary" },
+                                { type: "button", text: { type: "plain_text", text: "Blocked" }, action_id: "open_blocker_modal", value: r.id, style: "danger" },
+                                { type: "button", text: { type: "plain_text", text: "Target Date" }, action_id: "open_eta_modal", value: r.id },
+                                { type: "button", text: { type: "plain_text", text: "Report" }, action_id: "report_ticket", value: r.id }
+                            ]
+                        }
                     ]
                 });
-                r.lastSent = now; 
-                r.pingCount++; 
+                r.lastSent = now;
+                r.pingCount++;
                 r.dailyPingCount++;
-                
+
                 // Escalation alert: if ping count hits threshold, notify admin
                 if (r.pingCount === ESCALATION_PING_THRESHOLD) {
                     try {
@@ -920,7 +918,7 @@ cron.schedule('* * * * *', async () => {
                         console.error('Could not send escalation alert:', e);
                     }
                 }
-                
+
                 saveToDb(reminders);
             } catch (e) {
                 if (e.code === 'slack_webapi_platform_error' && e.data.error === 'channel_not_found') {
@@ -948,8 +946,7 @@ cron.schedule('* * * * *', async () => {
 });
 
 // Daily Reset for Ping Counts & Admin Dashboard
-// Reset daily ping counts and send admin dashboard every 2 days at 09:00
-cron.schedule('0 9 */2 * *', async () => {
+cron.schedule('0 9 * * 1-5', async () => {
     reminders.forEach(r => r.dailyPingCount = 0);
     saveToDb(reminders);
     // Staggered admin send handled inside sendAdminDashboard
@@ -1058,15 +1055,15 @@ app.action('resume_nudges', async ({ ack, body, action, client }) => {
     await ack();
     const r = reminders.find(rem => rem.id === action.value);
     if (r) {
-        r.status = 'ACTIVE'; 
+        r.status = 'ACTIVE';
         r.active = true; // RE-ACTIVATE follow-ups
-        r.lastSent = new Date(); 
+        r.lastSent = new Date();
         r.etaNotified = false; // Reset ETA notification flag so it can trigger again if ETA exists
         saveToDb(reminders);
-        await client.chat.postMessage({ 
-            channel: r.channel, 
-            thread_ts: r.thread_ts, 
-            text: `🚀 Unblocked! Reminders back on.` 
+        await client.chat.postMessage({
+            channel: r.channel,
+            thread_ts: r.thread_ts,
+            text: `🚀 Unblocked! Reminders back on.`
         });
     }
 });
@@ -1111,7 +1108,7 @@ app.action('stop_reminder', async ({ ack, body, action, client }) => {
     r.status = 'RESOLVED';
     r.resolved_at = new Date(); // Track resolution time for metrics
     saveToDb(reminders);
-    
+
     // Dynamic appreciation message based on ping count
     let appreciation;
     if (r.pingCount <= 1) {
@@ -1123,7 +1120,7 @@ app.action('stop_reminder', async ({ ack, body, action, client }) => {
     } else {
         appreciation = "🎉 Finally there! Great work sticking with it.";
     }
-    
+
     await client.chat.postMessage({
         channel: r.channel,
         thread_ts: r.thread_ts,
@@ -1160,7 +1157,7 @@ app.command('/admin-escalations', async ({ ack, body, client }) => {
         });
         return;
     }
-    
+
     const escalations = findEscalationCandidates();
     if (escalations.length === 0) {
         await client.chat.postMessage({
@@ -1169,13 +1166,13 @@ app.command('/admin-escalations', async ({ ack, body, client }) => {
         });
         return;
     }
-    
+
     const blocks = [
         { type: "header", text: { type: "plain_text", text: "🚨 Tickets Needing Attention Report" } },
         { type: "section", text: { type: "mrkdwn", text: `Found *${escalations.length}* ticket(s) requiring attention:` } },
         { type: "divider" }
     ];
-    
+
     escalations.forEach(r => {
         const hoursActive = (new Date() - new Date(r.created_at)) / (1000 * 60 * 60);
         blocks.push({
@@ -1183,7 +1180,7 @@ app.command('/admin-escalations', async ({ ack, body, client }) => {
             text: { type: "mrkdwn", text: `*"${r.note}"*\n👤 <@${r.assignee}> | 📍 ${r.priority} | 📊 ${r.pingCount} pings | ⏱️ Active ${Math.round(hoursActive)}h\n<${getThreadLink(r.channel, r.thread_ts)}|View Thread>` }
         });
     });
-    
+
     await client.chat.postMessage({ channel: body.channel_id, blocks, text: "Attention Needed" });
 });
 
@@ -1197,7 +1194,7 @@ app.command('/admin-workload', async ({ ack, body, client }) => {
         });
         return;
     }
-    
+
     const workload = {};
     reminders.forEach(r => {
         if (!workload[r.assignee]) {
@@ -1207,21 +1204,21 @@ app.command('/admin-workload', async ({ ack, body, client }) => {
         if (r.status === 'BLOCKED') workload[r.assignee].blocked++;
         if (r.status === 'RESOLVED') workload[r.assignee].completed++;
     });
-    
+
     const sorted = Object.entries(workload).sort((a, b) => b[1].active - a[1].active);
-    
+
     const blocks = [
         { type: "header", text: { type: "plain_text", text: "📊 Team Workload Distribution" } },
         { type: "section", text: { type: "mrkdwn", text: "Assignee | Active | Blocked | Completed\n" } }
     ];
-    
+
     sorted.forEach(([userId, data]) => {
         blocks.push({
             type: "section",
             text: { type: "mrkdwn", text: `<@${userId}> | *${data.active}* active | ${data.blocked} blocked | ${data.completed}% done` }
         });
     });
-    
+
     await client.chat.postMessage({ channel: body.channel_id, blocks, text: "Workload" });
 });
 
@@ -1229,7 +1226,7 @@ app.view('submit_report', async ({ ack, body, view, client }) => {
     await ack();
     const r = reminders.find(rem => rem.id === view.private_metadata);
     const reason = view.state.values.reason_block.reason.selected_option.value;
-    
+
     if (!r) return;
 
     // Log report
@@ -1277,6 +1274,8 @@ app.view('submit_report', async ({ ack, body, view, client }) => {
         // 1. Connect to MongoDB
         if (!process.env.MONGODB_URI) {
             console.error('❌ MONGODB_URI is missing in .env!');
+            console.error('👉 Please add MONGODB_URI=your_connection_string to your .env file.');
+            console.error('👉 If on Render, add it in the Environment Variables section.');
             process.exit(1);
         }
         await mongoose.connect(process.env.MONGODB_URI);
@@ -1285,7 +1284,7 @@ app.view('submit_report', async ({ ack, body, view, client }) => {
         // 2. Load Data into Memory
         const dbReminders = await ReminderModel.find({});
         reminders = dbReminders.map(r => r.toObject());
-        
+
         // Reset active pings on startup to prevent spam
         reminders.forEach(r => {
             if (r.active && r.status === 'ACTIVE') {
@@ -1307,7 +1306,7 @@ app.view('submit_report', async ({ ack, body, view, client }) => {
         // 3. Start Slack App
         await app.start();
         console.log('🚀 Jira Follow-up Bot is Live!');
-        
+
     } catch (e) {
         console.error('❌ Startup Error:', e);
         process.exit(1);
