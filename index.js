@@ -140,7 +140,12 @@ const app = new App({
 const getThreadLink = (channel, ts) => `https://slack.com/archives/${channel}/p${ts.replace('.', '')}`;
 
 const getStartupGreeting = (user) => {
-    const hour = new Date().getHours();
+    // Current time in IST (UTC+5:30)
+    const now = new Date();
+    const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
+    const ist = new Date(utc + (3600000 * 5.5));
+    const hour = ist.getHours();
+
     let greet = "Ready to crush it?";
     if (hour < 12) greet = "Morning caffeine kick! ☕";
     else if (hour >= 12 && hour <= 14) greet = "Hope lunch was great! 🥗";
@@ -227,7 +232,17 @@ const generateCSVContent = (creatorId) => {
 const sendDashboardAndCSV = async (userId, offsetMs = 0) => {
     const sendNow = async () => {
         const myThreads = reminders.filter(r => r.created_by === userId && r.active);
-        if (myThreads.length === 0) return;
+        if (myThreads.length === 0) {
+            try {
+                // Feedback for empty state
+                const dm = await app.client.conversations.open({ users: userId });
+                await app.client.chat.postMessage({
+                    channel: dm.channel.id,
+                    text: "You don't have any active reminders tracking right now. Create one with the shortcut!"
+                });
+            } catch (e) { console.error("Could not send empty report DM", e); }
+            return;
+        }
 
         try {
             const dm = await app.client.conversations.open({ users: userId });
@@ -698,6 +713,16 @@ app.action('open_blocker_modal', async ({ ack, body, action, client }) => {
     await ack();
     const r = reminders.find(rem => rem.id === action.value);
     if (!r || !r.active || r.status === 'RESOLVED') return;
+
+    // 🔒 Security Check
+    if (body.user.id !== r.assignee) {
+        await client.chat.postEphemeral({
+            channel: body.channel_id,
+            user: body.user.id,
+            text: "🚫 Only the assignee can report a blocker for this task."
+        });
+        return;
+    }
     await client.views.open({
         trigger_id: body.trigger_id,
         view: {
@@ -800,6 +825,16 @@ app.action('open_eta_modal', async ({ ack, body, action, client }) => {
     await ack();
     const r = reminders.find(rem => rem.id === action.value);
     if (!r || !r.active || r.status === 'RESOLVED') return;
+
+    // 🔒 Security Check
+    if (body.user.id !== r.assignee) {
+        await client.chat.postEphemeral({
+            channel: body.channel_id,
+            user: body.user.id,
+            text: "🚫 Only the assignee can set a target date."
+        });
+        return;
+    }
     await client.views.open({
         trigger_id: body.trigger_id,
         view: {
@@ -845,9 +880,14 @@ app.view('submit_eta', async ({ ack, body, view, client }) => {
 // ---------------------------
 
 cron.schedule('* * * * *', async () => {
+    // Convert to IST for working hours check
     const now = new Date();
-    const hour = now.getHours();
-    const day = now.getDay();
+    const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
+    const ist = new Date(utc + (3600000 * 5.5));
+
+    const hour = ist.getHours();
+    const day = ist.getDay();
+
     // Respect working days/hours strictly in production
     if (!WORKING_DAYS.includes(day) || hour < WORKING_HOURS.start || hour >= WORKING_HOURS.end) return;
 
@@ -1117,6 +1157,17 @@ app.action('stop_reminder', async ({ ack, body, action, client }) => {
     await ack();
     const r = reminders.find(rem => rem.id === action.value);
     if (!r || !r.active || r.status === 'RESOLVED') return;
+
+    // 🔒 Security Check: Only Assignee can mark as done
+    if (body.user.id !== r.assignee) {
+        await client.chat.postEphemeral({
+            channel: body.channel.id,
+            user: body.user.id,
+            text: "🚫 Only the assignee can mark this as active/done. You can 'Report' it if needed."
+        });
+        return;
+    }
+
     r.active = false;
     r.status = 'RESOLVED';
     r.resolved_at = new Date(); // Track resolution time for metrics

@@ -55,6 +55,26 @@ Scroll down to **Environment Variables** and add these:
 **Important:** Render's free tier spins down after inactivity. Since we have a "dummy" server now, Render will keep it alive as long as it receives traffic. However, for a Slack bot, it might sleep.
 *   **Pro Tip:** Use a free uptime monitor (like UptimeRobot) to ping your Render URL (`https://your-bot-name.onrender.com`) every 5 minutes. This keeps the free tier active!
 
+
+---
+
+## Step 4: Keep It Alive (Critical for Free Tier) ⚡
+
+Render's free tier puts your app to "sleep" after 15 minutes of no traffic. If it sleeps, your bot won't respond!
+
+**The Workaround:**
+We need an external service to "ping" your dummy web server every few minutes.
+
+1.  Sign up for a free account at [UptimeRobot](https://uptimerobot.com/) (or any similar service).
+2.  Create a **New Monitor**.
+3.  **Monitor Type**: HTTP(s).
+4.  **Friendly Name**: My Slack Bot.
+5.  **URL**: The URL Render gave you (e.g., `https://slack-reminder-bot.onrender.com`).
+6.  **Monitoring Interval**: 5 minutes.
+7.  **Create Monitor**.
+
+**That's it!** UptimeRobot will hit your site every 5 minutes, preventing Render from ever creating a "period of inactivity". Your bot will stay awake 24/7 for free.
+
 ---
 
 ## 🛠️ Validation
