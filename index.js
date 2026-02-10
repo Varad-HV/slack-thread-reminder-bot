@@ -784,37 +784,45 @@ app.view('submit_blocker', async ({ ack, body, view, client }) => {
 
 app.action('report_ticket', async ({ ack, body, action, client }) => {
     await ack();
-    const r = reminders.find(rem => rem.id === action.value);
-    if (!r || !r.active || r.status === 'RESOLVED') return;
+    console.log(`[DEBUG] report_ticket clicked by ${body.user.id} for item ${action.value}`);
 
-    await client.views.open({
-        trigger_id: body.trigger_id,
-        view: {
-            type: 'modal',
-            callback_id: 'submit_report',
-            private_metadata: action.value,
-            title: { type: 'plain_text', text: 'Report Issue' },
-            submit: { type: 'plain_text', text: 'Submit' },
-            blocks: [
-                { type: "section", text: { type: "mrkdwn", text: "Why are you reporting this?" } },
-                {
-                    type: "input",
-                    block_id: "reason_block",
-                    element: {
-                        type: "static_select",
-                        action_id: "reason",
-                        options: [
-                            { text: { type: "plain_text", text: "Invalid/Not real work" }, value: "invalid" },
-                            { text: { type: "plain_text", text: "Team won't pick up" }, value: "deprioritized" },
-                            { text: { type: "plain_text", text: "Spam/Testing" }, value: "spam" },
-                            { text: { type: "plain_text", text: "Other reason" }, value: "other" }
-                        ]
-                    },
-                    label: { type: "plain_text", text: "Issue Type" }
-                }
-            ]
-        }
-    });
+    const r = reminders.find(rem => rem.id === action.value);
+    if (!r) { console.log('[DEBUG] Report: Reminder not found'); return; }
+    if (!r.active) { console.log('[DEBUG] Report: Reminder inactive'); return; }
+    if (r.status === 'RESOLVED') { console.log('[DEBUG] Report: Reminder resolved'); return; }
+
+    try {
+        await client.views.open({
+            trigger_id: body.trigger_id,
+            view: {
+                type: 'modal',
+                callback_id: 'submit_report',
+                private_metadata: action.value,
+                title: { type: 'plain_text', text: 'Report Issue' },
+                submit: { type: 'plain_text', text: 'Submit' },
+                blocks: [
+                    { type: "section", text: { type: "mrkdwn", text: "Why are you reporting this?" } },
+                    {
+                        type: "input",
+                        block_id: "reason_block",
+                        element: {
+                            type: "static_select",
+                            action_id: "reason",
+                            options: [
+                                { text: { type: "plain_text", text: "Invalid/Not real work" }, value: "invalid" },
+                                { text: { type: "plain_text", text: "Team won't pick up" }, value: "deprioritized" },
+                                { text: { type: "plain_text", text: "Spam/Testing" }, value: "spam" },
+                                { text: { type: "plain_text", text: "Other reason" }, value: "other" }
+                            ]
+                        },
+                        label: { type: "plain_text", text: "Issue Type" }
+                    }
+                ]
+            }
+        });
+    } catch (e) {
+        console.error('[DEBUG] Report modal failed:', e);
+    }
 });
 
 // ---------------------------
@@ -1155,19 +1163,29 @@ app.action('cancel_call', async ({ ack, body, action, client }) => {
 
 app.action('stop_reminder', async ({ ack, body, action, client }) => {
     await ack();
+    console.log(`[DEBUG] stop_reminder clicked by ${body.user.id} for item ${action.value}`);
+
     const r = reminders.find(rem => rem.id === action.value);
-    if (!r || !r.active || r.status === 'RESOLVED') return;
+    if (!r) { console.log('[DEBUG] Reminder not found in memory'); return; }
+    if (!r.active) { console.log('[DEBUG] Reminder is not active'); return; }
+    if (r.status === 'RESOLVED') { console.log('[DEBUG] Reminder is already resolved'); return; }
 
     // 🔒 Security Check: Only Assignee can mark as done
     if (body.user.id !== r.assignee) {
-        await client.chat.postEphemeral({
-            channel: body.channel.id,
-            user: body.user.id,
-            text: "🚫 Only the assignee can mark this as active/done. You can 'Report' it if needed."
-        });
+        console.log(`[DEBUG] Blocked non-assignee: ${body.user.id} !== ${r.assignee}`);
+        try {
+            await client.chat.postEphemeral({
+                channel: r.channel, // Use reminder's channel to be safe
+                user: body.user.id,
+                text: "🚫 Only the assignee can mark this as active/done. You can 'Report' it if needed."
+            });
+        } catch (error) {
+            console.error('[DEBUG] Failed to post ephemeral message:', error);
+        }
         return;
     }
 
+    console.log('[DEBUG] Security check passed. resolving reminder.');
     r.active = false;
     r.status = 'RESOLVED';
     r.resolved_at = new Date(); // Track resolution time for metrics
