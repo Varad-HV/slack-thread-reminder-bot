@@ -28,6 +28,7 @@ const ReminderSchema = new mongoose.Schema({
     assigneeName: String,
     created_by: String,
     creatorName: String,
+    creatorAvatar: String,
     created_at: Date,
     frequencyMinutes: Number,
     priority: String,
@@ -117,7 +118,7 @@ const getAdminStats = () => {
     return adminStatsCache;
 };
 
-const ADMIN_USER_ID = process.env.ADMIN_USER_ID || 'U123'; // Set in .env 
+const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || process.env.ADMIN_USER_ID || 'U123').split(',').map(id => id.trim()); // Set in .env
 // Enforce working hours in production; removed BYPASS_WORKING_HOURS override
 const DAILY_PING_LIMIT = 10; // Max pings per day per reminder
 const ESCALATION_PING_THRESHOLD = 15; // Flag tickets with 15+ pings
@@ -146,10 +147,32 @@ const getStartupGreeting = (user) => {
     const ist = new Date(utc + (3600000 * 5.5));
     const hour = ist.getHours();
 
-    let greet = "Ready to crush it?";
-    if (hour < 12) greet = "Morning caffeine kick! ☕";
-    else if (hour >= 12 && hour <= 14) greet = "Hope lunch was great! 🥗";
-    else greet = "Evening vibes. 🌅";
+    const morningGreets = [
+        "Morning! Just leaving this here so it doesn't vanish into the abyss.",
+        "Hey! Gentle nudge on this whenever you have a second.",
+        "Morning. I know it's early, but this ticket missed you.",
+        "Bumping this up your inbox for today."
+    ];
+    
+    const afternoonGreets = [
+        "Afternoon! Hope your day is going smoother than expected.",
+        "Just a casual mid-day check-in on this one.",
+        "Not to interrupt the flow, but any news here?",
+        "Dropping by to see if we can get this unblocked soon."
+    ];
+    
+    const eveningGreets = [
+        "Evening! Checking in before we all call it a day.",
+        "Still going strong? Any updates before logging off?",
+        "Just a late ping to keep this on the radar for tomorrow.",
+        "Wrapping up? Let me know if you need anything from our end on this."
+    ];
+
+    let greetArray = eveningGreets;
+    if (hour < 12) greetArray = morningGreets;
+    else if (hour >= 12 && hour <= 16) greetArray = afternoonGreets;
+
+    const greet = greetArray[Math.floor(Math.random() * greetArray.length)];
     return `${greet} <@${user}>,`;
 };
 
@@ -286,7 +309,7 @@ const sendDashboardAndCSV = async (userId, offsetMs = 0) => {
 };
 
 const sendAdminDashboard = async () => {
-    if (!ADMIN_USER_ID || ADMIN_USER_ID === 'U123') return; // Skip if not configured
+    if (!ADMIN_USER_IDS.length || ADMIN_USER_IDS.includes('U123')) return; // Skip if not configured
 
     try {
         const stats = getAdminStats();
@@ -302,7 +325,7 @@ const sendAdminDashboard = async () => {
 
         // Beautiful formatted blocks
         const blocks = [
-            { type: "header", text: { type: "plain_text", text: "📊 Admin Dashboard" } },
+            { type: "header", text: { type: "plain_text", text: "📊 Solutions / Integrations Dashboard" } },
 
             // Quick Stats Section
             { type: "section", text: { type: "mrkdwn", text: "*📈 Quick Stats*" } },
@@ -318,7 +341,7 @@ const sendAdminDashboard = async () => {
             { type: "divider" },
 
             // Efficiency Metrics
-            { type: "section", text: { type: "mrkdwn", text: "*⚡ Team Performance*" } },
+            { type: "section", text: { type: "mrkdwn", text: "*⚡ Partner Team Responsiveness*" } },
             {
                 type: "section", fields: [
                     { type: "mrkdwn", text: `*Completion Rate*\n${metrics.completionRate}%` },
@@ -331,7 +354,7 @@ const sendAdminDashboard = async () => {
             { type: "divider" },
 
             // Top Performers
-            { type: "section", text: { type: "mrkdwn", text: "*🏆 Top Performers*" } }
+            { type: "section", text: { type: "mrkdwn", text: "*🏆 Fastest Responders*" } }
         ];
 
         // Top assignees
@@ -390,7 +413,7 @@ const sendAdminDashboard = async () => {
         }
 
         // Open DM(s) and send with staggering to avoid rate limits
-        const recipients = [ADMIN_USER_ID].filter(Boolean);
+        const recipients = ADMIN_USER_IDS.filter(Boolean);
         const csvContent = generateAdminCSV(metrics, escalations);
         recipients.forEach((userId, idx) => {
             const delay = idx * 1500; // 1.5 seconds per user
@@ -540,7 +563,7 @@ const generateRecommendations = (metrics, escalations, reportAnalytics) => {
         .slice(0, 2);
 
     if (poorPerformers.length > 0) {
-        recommendations.push(`💡 Check in with ${poorPerformers.join(', ')} - might need support or clarity`);
+        recommendations.push(`💡 Check in with ${poorPerformers.join(', ')} - might require escalation or an alignment sync`);
     }
 
     if (metrics.completionRate < 50) {
@@ -650,6 +673,7 @@ app.view('create_reminder', async ({ ack, body, view, client }) => {
         assigneeName: assigneeInfo.user.real_name,
         created_by: body.user.id,
         creatorName: creatorInfo.user.real_name,
+        creatorAvatar: creatorInfo.user.profile.image_192,
         created_at: new Date(),
         frequencyMinutes: frequencyMinutes,
         priority: priority,
@@ -916,9 +940,23 @@ cron.schedule('* * * * *', async () => {
                 // Within 1 day but not reached - send single "target date tomorrow" message once
                 if (!r.etaNotified) {
                     try {
+                        let icon_url = r.creatorAvatar;
+                        if (!icon_url) {
+                            try {
+                                const creatorInfo = await app.client.users.info({ user: r.created_by });
+                                icon_url = creatorInfo.user.profile.image_192;
+                                r.creatorAvatar = icon_url;
+                                saveToDb(reminders);
+                            } catch (e) {
+                                console.error('Could not fetch creator info for avatar', e);
+                            }
+                        }
+
                         await app.client.chat.postMessage({
                             channel: r.channel, thread_ts: r.thread_ts,
-                            text: `Target date is tomorrow! Make sure this is ready.`
+                            text: `Target date is tomorrow! Make sure this is ready.`,
+                            username: `${r.creatorName} (via JiraPing)`,
+                            icon_url: icon_url
                         });
                         r.etaNotified = true;
                         saveToDb(reminders);
@@ -945,9 +983,23 @@ cron.schedule('* * * * *', async () => {
                     contextMsg = `${getStartupGreeting(target)} any progress? If you can, drop a target date so we can plan around it 📅`;
                 }
 
+                let icon_url = r.creatorAvatar;
+                if (!icon_url) {
+                    try {
+                        const creatorInfo = await app.client.users.info({ user: r.created_by });
+                        icon_url = creatorInfo.user.profile.image_192;
+                        r.creatorAvatar = icon_url;
+                        saveToDb(reminders);
+                    } catch (e) {
+                        console.error('Could not fetch creator info for avatar', e);
+                    }
+                }
+
                 await app.client.chat.postMessage({
                     channel: r.channel, thread_ts: r.thread_ts,
                     text: "Friendly Check-in",
+                    username: `${r.creatorName} (via JiraPing)`,
+                    icon_url: icon_url,
                     blocks: [
                         { type: "section", text: { type: "mrkdwn", text: contextMsg } },
                         {
@@ -964,17 +1016,23 @@ cron.schedule('* * * * *', async () => {
                 r.pingCount++;
                 r.dailyPingCount++;
 
-                // Escalation alert: if ping count hits threshold, notify admin
+                // Escalation alert: if ping count hits threshold, notify admins
                 if (r.pingCount === ESCALATION_PING_THRESHOLD) {
                     try {
-                        const dm = await app.client.conversations.open({ users: ADMIN_USER_ID });
-                        await app.client.chat.postMessage({
-                            channel: dm.channel.id,
-                            text: `⚠️ ESCALATION ALERT`,
-                            blocks: [
-                                { type: "section", text: { type: "mrkdwn", text: `🚨 Ticket in limbo: "*${r.note}*" for <@${r.assignee}> has reached ${r.pingCount} pings.\n*Priority:* ${r.priority} | *Assigned by:* <@${r.created_by}>\n<${getThreadLink(r.channel, r.thread_ts)}|View Thread>` } }
-                            ]
-                        });
+                        for (const adminId of ADMIN_USER_IDS.filter(Boolean)) {
+                            try {
+                                const dm = await app.client.conversations.open({ users: adminId });
+                                await app.client.chat.postMessage({
+                                    channel: dm.channel.id,
+                                    text: `⚠️ ESCALATION ALERT`,
+                                    blocks: [
+                                        { type: "section", text: { type: "mrkdwn", text: `🚨 Ticket in limbo: "*${r.note}*" for <@${r.assignee}> has reached ${r.pingCount} pings.\n*Priority:* ${r.priority} | *Assigned by:* <@${r.created_by}>\n<${getThreadLink(r.channel, r.thread_ts)}|View Thread>` } }
+                                    ]
+                                });
+                            } catch (dmErr) {
+                                console.error(`Escalation alert failed for admin ${adminId}`, dmErr);
+                            }
+                        }
                     } catch (e) {
                         console.error('Could not send escalation alert:', e);
                     }
@@ -1012,7 +1070,7 @@ cron.schedule('0 9 * * 1-5', async () => {
     saveToDb(reminders);
     // Staggered admin send handled inside sendAdminDashboard
     await sendAdminDashboard();
-});
+}, { timezone: "Asia/Kolkata" });
 
 // ---------------------------
 // Daily Midnight Cleanup & Archiving
@@ -1029,13 +1087,13 @@ cron.schedule('0 0 * * *', async () => {
             const refDate = r.status === 'RESOLVED' && r.resolved_at ? new Date(r.resolved_at) : new Date(r.created_at);
             const ageDays = Math.floor((now - refDate) / DAY);
 
-            // Warn creator at 25 days for resolved reminders
-            if (r.status === 'RESOLVED' && ageDays >= 25 && ageDays < 30) {
+            // Warn creator at 85 days for resolved reminders
+            if (r.status === 'RESOLVED' && ageDays >= 85 && ageDays < 90) {
                 warnings.push({ reminder: r, days: ageDays });
             }
 
-            // Delete permanently at 30+ days for RESOLVED or BLOCKED
-            if ((r.status === 'RESOLVED' || r.status === 'BLOCKED') && ageDays >= 30) {
+            // Delete permanently at 90+ days for RESOLVED or BLOCKED
+            if ((r.status === 'RESOLVED' || r.status === 'BLOCKED') && ageDays >= 90) {
                 toDeleteIds.add(r.id);
             }
         } catch (e) {
@@ -1054,7 +1112,7 @@ cron.schedule('0 0 * * *', async () => {
                     channel: dm.channel.id,
                     text: `Reminder purge warning`,
                     blocks: [
-                        { type: 'section', text: { type: 'mrkdwn', text: `Hi <@${reminder.created_by}>, your reminder "*${reminder.note}*" is ${days} days old and marked ${reminder.status}. It will be automatically purged in ${30 - days} day(s). If you'd like to keep a record, run /sa-report to download your tasks.` } }
+                        { type: 'section', text: { type: 'mrkdwn', text: `Hi <@${reminder.created_by}>, your reminder "*${reminder.note}*" is ${days} days old and marked ${reminder.status}. It will be automatically purged in ${90 - days} day(s). If you'd like to keep a record, run /sa-report to download your tasks.` } }
                     ]
                 });
             } catch (e) { console.error('Could not send purge warning for', reminder.id, e); }
@@ -1095,7 +1153,7 @@ cron.schedule('0 0 * * *', async () => {
             }, delay);
         }
     }
-});
+}, { timezone: 'Asia/Kolkata' });
 
 app.message(async ({ message, client }) => {
     if (!message.thread_ts || message.bot_id) return;
@@ -1218,7 +1276,7 @@ app.command('/sa-report', async ({ ack, body }) => {
 // Admin commands for deep insights and bulk operations
 app.command('/admin-stats', async ({ ack, body, client }) => {
     await ack();
-    if (body.user_id !== ADMIN_USER_ID) {
+    if (!ADMIN_USER_IDS.includes(body.user_id)) {
         await client.chat.postEphemeral({
             channel: body.channel_id,
             user: body.user_id,
@@ -1231,7 +1289,7 @@ app.command('/admin-stats', async ({ ack, body, client }) => {
 
 app.command('/admin-escalations', async ({ ack, body, client }) => {
     await ack();
-    if (body.user_id !== ADMIN_USER_ID) {
+    if (!ADMIN_USER_IDS.includes(body.user_id)) {
         await client.chat.postEphemeral({
             channel: body.channel_id,
             user: body.user_id,
@@ -1268,7 +1326,7 @@ app.command('/admin-escalations', async ({ ack, body, client }) => {
 
 app.command('/admin-workload', async ({ ack, body, client }) => {
     await ack();
-    if (body.user_id !== ADMIN_USER_ID) {
+    if (!ADMIN_USER_IDS.includes(body.user_id)) {
         await client.chat.postEphemeral({
             channel: body.channel_id,
             user: body.user_id,
@@ -1290,7 +1348,7 @@ app.command('/admin-workload', async ({ ack, body, client }) => {
     const sorted = Object.entries(workload).sort((a, b) => b[1].active - a[1].active);
 
     const blocks = [
-        { type: "header", text: { type: "plain_text", text: "📊 Team Workload Distribution" } },
+        { type: "header", text: { type: "plain_text", text: "📊 External Workload Distribution" } },
         { type: "section", text: { type: "mrkdwn", text: "Assignee | Active | Blocked | Completed\n" } }
     ];
 
