@@ -578,7 +578,9 @@ const generateRecommendations = (metrics, escalations, reportAnalytics) => {
  */
 const generateAdminCSV = (metrics, escalations) => {
     const escalationIds = new Set(escalations.map(r => r.id));
-    let csv = "Ticket,Assignee,Reporter,Status,Pings,Priority,Created,Resolution Days,Channel,Thread Link,Blocker Reason,Escalated,Assignee Efficiency,Jira\n";
+    const stats = getAdminStats();
+    const reports = (stats && stats.reports) ? stats.reports : [];
+    let csv = "Ticket,Assignee,Reporter,Status,Pings,Priority,Created,Resolution Days,Channel,Thread Link,Blocker Reason,Reported As,Escalated,Assignee Efficiency,Jira\n";
 
     reminders.forEach(r => {
         const assigneeData = metrics.assigneeMetrics[r.assignee];
@@ -587,6 +589,8 @@ const generateAdminCSV = (metrics, escalations) => {
             : 'Active';
         const efficiency = assigneeData ? assigneeData.efficiencyScore.toFixed(1) : 'N/A';
         const isEscalated = escalationIds.has(r.id) ? 'YES' : 'NO';
+        const report = reports.find(rep => rep.reminder_id === r.id);
+        const reportReason = report ? report.type : 'None';
 
         const row = [
             `"${r.note.replace(/"/g, '""')}"`,
@@ -600,6 +604,7 @@ const generateAdminCSV = (metrics, escalations) => {
             r.channel,
             getThreadLink(r.channel, r.thread_ts),
             r.blockerReason ? `"${r.blockerReason.replace(/"/g, '""')}"` : 'None',
+            reportReason,
             isEscalated,
             efficiency,
             r.jira || 'N/A'
@@ -698,6 +703,8 @@ app.view('create_reminder', async ({ ack, body, view, client }) => {
         channel: reminder.channel,
         thread_ts: reminder.thread_ts,
         text: `Follow-up created`,
+        username: `${creatorInfo.user.real_name} (via JiraPing)`,
+        icon_url: creatorInfo.user.profile.image_192,
         blocks: [
             { type: "header", text: { type: "plain_text", text: "Follow-up Reminder Set ✨" } },
             {
@@ -722,6 +729,8 @@ app.view('create_reminder', async ({ ack, body, view, client }) => {
     await client.chat.postMessage({
         channel: reminder.channel,
         thread_ts: reminder.thread_ts,
+        username: `${creatorInfo.user.real_name} (via JiraPing)`,
+        icon_url: creatorInfo.user.profile.image_192,
         blocks: buildThreadBlock(reminder),
         text: "Actions available"
     });
