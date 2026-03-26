@@ -197,7 +197,7 @@ const getGoogleAuth = () => {
     }
     return new google.auth.GoogleAuth({
         keyFile: credentialsPath,
-        scopes: ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive.file'],
+        scopes: ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive'],
     });
 };
 
@@ -229,10 +229,10 @@ const createGoogleSheetReport = async (title, headers, rows, spreadsheetId = nul
                 },
             });
         } else {
-            // 1. Clear Existing Data if updating
+            // 1. Clear Existing Data if updating (clears first 5000 rows, all columns)
             await sheets.spreadsheets.values.clear({
                 spreadsheetId: finalSpreadsheetId,
-                range: 'Sheet1!A1:Z1000',
+                range: 'A1:Z5000', 
             });
             url = `https://docs.google.com/spreadsheets/d/${finalSpreadsheetId}`;
         }
@@ -374,41 +374,49 @@ const sendDashboardAndCSV = async (userId, offsetMs = 0) => {
 
             await app.client.chat.postMessage({ channel: channelId, blocks, text: "Dashboard is ready" });
 
-            await app.client.chat.postMessage({ channel: channelId, blocks, text: "Dashboard is ready" });
-
             const reportData = generateReportData(userId);
             if (reportData) {
-                // Find potential existing sheet
-                const existing = await UserSheetModel.findOne({ userId, type: 'personal' });
-                const { spreadsheetId, url } = await createGoogleSheetReport(
-                    reportData.headers.length > 0 ? "Personal Report" : "My Dashboard", 
-                    reportData.headers, 
-                    reportData.rows, 
-                    existing?.spreadsheetId
-                );
+                try {
+                    // Find potential existing sheet
+                    const existing = await UserSheetModel.findOne({ userId, type: 'personal' });
+                    const { spreadsheetId, url } = await createGoogleSheetReport(
+                        "Personal Dashboard", 
+                        reportData.headers, 
+                        reportData.rows, 
+                        existing?.spreadsheetId
+                    );
 
-                if (!existing) {
-                    await new UserSheetModel({ userId, type: 'personal', spreadsheetId, url }).save();
-                }
+                    if (!existing) {
+                        await new UserSheetModel({ userId, type: 'personal', spreadsheetId, url }).save();
+                    }
 
-                await app.client.chat.postMessage({
-                    channel: channelId,
-                    text: `📊 *Task Data Export:* Your tasks are ready for analysis.\n🔗 <${url}|View Google Sheet>`,
-                    blocks: [
-                        {
-                            type: "section",
-                            text: { type: "mrkdwn", text: "📊 *Task Data Export:* Your tasks are ready for analysis." },
-                            accessory: {
-                                type: "button",
-                                text: { type: "plain_text", text: "Open Google Sheet 🔗" },
-                                url: url,
-                                action_id: "open_sheet"
+                    await app.client.chat.postMessage({
+                        channel: channelId,
+                        text: `📊 *Task Data Export:* Your tasks are ready for analysis.\n🔗 <${url}|View Google Sheet>`,
+                        blocks: [
+                            {
+                                type: "section",
+                                text: { type: "mrkdwn", text: "📊 *Task Data Export:* Your tasks are ready for analysis." },
+                                accessory: {
+                                    type: "button",
+                                    text: { type: "plain_text", text: "Open Google Sheet 🔗" },
+                                    url: url,
+                                    action_id: "open_sheet"
+                                }
                             }
-                        }
-                    ]
-                });
+                        ]
+                    });
+                } catch (sheetErr) {
+                    console.error("Personal Sheet Fail", sheetErr);
+                    await app.client.chat.postMessage({
+                        channel: channelId,
+                        text: `⚠️ *Google Sheet Error:* I couldn't generate your export link.\n*Reason:* ${sheetErr.message}\n_Please ensure the Google Sheets and Drive APIs are enabled for the Service Account._`
+                    });
+                }
             }
-        } catch (e) { console.error("Report Fail", e); }
+        } catch (e) { 
+            console.error("Report System Fail", e);
+        }
     };
 
     if (offsetMs && offsetMs > 0) {
@@ -533,35 +541,43 @@ const sendAdminDashboard = async () => {
                     
                     const adminReportData = generateAdminReportData(metrics, escalations);
                     if (adminReportData) {
-                        // Persistent global admin sheet
-                        const existingAdmin = await UserSheetModel.findOne({ type: 'admin' });
-                        const { spreadsheetId, url } = await createGoogleSheetReport(
-                            "Admin Dashboard", 
-                            adminReportData.headers, 
-                            adminReportData.rows, 
-                            existingAdmin?.spreadsheetId
-                        );
+                        try {
+                            // Persistent global admin sheet
+                            const existingAdmin = await UserSheetModel.findOne({ type: 'admin' });
+                            const { spreadsheetId, url } = await createGoogleSheetReport(
+                                "Admin Dashboard", 
+                                adminReportData.headers, 
+                                adminReportData.rows, 
+                                existingAdmin?.spreadsheetId
+                            );
 
-                        if (!existingAdmin) {
-                            await new UserSheetModel({ userId: 'GLOBAL_ADMIN', type: 'admin', spreadsheetId, url }).save();
-                        }
+                            if (!existingAdmin) {
+                                await new UserSheetModel({ userId: 'GLOBAL_ADMIN', type: 'admin', spreadsheetId, url }).save();
+                            }
 
-                        await app.client.chat.postMessage({
-                            channel: dm.channel.id,
-                            text: `📊 *Complete Admin Export*\n🔗 <${url}|View Google Sheet>`,
-                            blocks: [
-                                {
-                                    type: "section",
-                                    text: { type: "mrkdwn", text: "📊 *Complete Admin Export*" },
-                                    accessory: {
-                                        type: "button",
-                                        text: { type: "plain_text", text: "Open Google Sheet 🔗" },
-                                        url: url,
-                                        action_id: "open_admin_sheet"
+                            await app.client.chat.postMessage({
+                                channel: dm.channel.id,
+                                text: `📊 *Complete Admin Export*\n🔗 <${url}|View Google Sheet>`,
+                                blocks: [
+                                    {
+                                        type: "section",
+                                        text: { type: "mrkdwn", text: "📊 *Complete Admin Export*" },
+                                        accessory: {
+                                            type: "button",
+                                            text: { type: "plain_text", text: "Open Google Sheet 🔗" },
+                                            url: url,
+                                            action_id: "open_admin_sheet"
+                                        }
                                     }
-                                }
-                            ]
-                        });
+                                ]
+                            });
+                        } catch (adminSheetErr) {
+                            console.error("Admin Sheet Fail", adminSheetErr);
+                            await app.client.chat.postMessage({
+                                channel: dm.channel.id,
+                                text: `⚠️ *Admin Sheet Error:* I couldn't generate the export link.\n*Reason:* ${adminSheetErr.message}`
+                            });
+                        }
                     }
                 } catch (err) {
                     console.error('Could not send admin dashboard to', userId, err);
