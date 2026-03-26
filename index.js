@@ -165,14 +165,14 @@ const getStartupGreeting = (user) => {
         "Morning. I know it's early, but this ticket missed you.",
         "Bumping this up your inbox for today."
     ];
-    
+
     const afternoonGreets = [
         "Afternoon! Hope your day is going smoother than expected.",
         "Just a casual mid-day check-in on this one.",
         "Not to interrupt the flow, but any news here?",
         "Dropping by to see if we can get this unblocked soon."
     ];
-    
+
     const eveningGreets = [
         "Evening! Checking in before we all call it a day.",
         "Still going strong? Any updates before logging off?",
@@ -193,7 +193,7 @@ const getStartupGreeting = (user) => {
  */
 const getGoogleAuth = () => {
     let credentials;
-    
+
     // 1. Load raw credentials
     if (process.env.GOOGLE_CREDENTIALS_JSON) {
         try {
@@ -221,7 +221,7 @@ const getGoogleAuth = () => {
                 .replace(/-----END PRIVATE KEY-----/, '')
                 .replace(/\\n/g, '')   // Remove literal \n strings
                 .replace(/\s/g, '');   // Remove all whitespace
-            
+
             const derBuffer = Buffer.from(b64Body, 'base64');
             const privateKey = crypto.createPrivateKey({
                 key: derBuffer,
@@ -330,7 +330,7 @@ const createGoogleSheetReport = async (title, headers, rows, spreadsheetId = nul
             if (overwrite) {
                 await sheets.spreadsheets.values.clear({
                     spreadsheetId: finalSpreadsheetId,
-                    range: 'Sheet1!A1:Z5000', 
+                    range: 'Sheet1!A1:Z5000',
                 });
             }
         }
@@ -488,9 +488,9 @@ const sendDashboardAndCSV = async (userId, offsetMs = 0) => {
                     // Find potential existing sheet
                     const existing = await UserSheetModel.findOne({ userId, type: 'personal' });
                     const { spreadsheetId, url } = await createGoogleSheetReport(
-                        "Personal Dashboard", 
-                        reportData.headers, 
-                        reportData.rows, 
+                        "Personal Dashboard",
+                        reportData.headers,
+                        reportData.rows,
                         existing?.spreadsheetId
                     );
 
@@ -522,7 +522,7 @@ const sendDashboardAndCSV = async (userId, offsetMs = 0) => {
                     });
                 }
             }
-        } catch (e) { 
+        } catch (e) {
             console.error("Report System Fail", e);
         }
     };
@@ -646,14 +646,14 @@ const sendAdminDashboard = async () => {
                 try {
                     const dm = await app.client.conversations.open({ users: userId });
                     await app.client.chat.postMessage({ channel: dm.channel.id, blocks, text: "Admin Dashboard" });
-                    
+
                     const adminReportData = generateAdminReportData(metrics, escalations);
                     if (adminReportData) {
                         try {
                             // Persistent global admin sheet
                             const { spreadsheetId, url } = await createGoogleSheetReport(
-                                "Admin Dashboard", 
-                                adminReportData.headers, 
+                                "Admin Dashboard",
+                                adminReportData.headers,
                                 adminReportData.rows,
                                 null, // Pass null so it checks for ADMIN_SPREADSHEET_ID in env
                                 true  // Overwrite enabled for real-time snapshot
@@ -661,11 +661,11 @@ const sendAdminDashboard = async () => {
 
                             await app.client.chat.postMessage({
                                 channel: dm.channel.id,
-                                text: `📊 *Aesthetic Admin Dashboard Sync*\n🔗 <${url}|View Master Spreadsheet>`,
+                                text: `📊 *Admin Dashboard*\n🔗 <${url}|View Master Spreadsheet>`,
                                 blocks: [
                                     {
                                         type: "section",
-                                        text: { type: "mrkdwn", text: "📊 *Aesthetic Admin Dashboard Sync*\nYour master spreadsheet has been updated with the latest metrics." },
+                                        text: { type: "mrkdwn", text: "📊 *Admin Dashboard*\nYour master spreadsheet has been updated with the latest metrics." },
                                         accessory: {
                                             type: "button",
                                             text: { type: "plain_text", text: "Open Master Sheet 🔗" },
@@ -831,7 +831,7 @@ const generateAdminReportData = (metrics, escalations) => {
     const escalationIds = new Set(escalations.map(r => r.id));
     const stats = getAdminStats();
     const reports = (stats && stats.reports) ? stats.reports : [];
-    
+
     const headers = ["Ticket", "Assignee", "Reporter", "Status", "Pings", "Frequency", "Created", "Resolution Days", "Channel", "Thread Link", "Blocker Reason", "Reported As", "Escalated", "Assignee Efficiency", "Jira"];
     const rows = reminders.map(r => {
         const assigneeData = metrics.assigneeMetrics[r.assignee];
@@ -1374,9 +1374,9 @@ cron.schedule('0 0 * * *', async () => {
                     if (reportData) {
                         const existing = await UserSheetModel.findOne({ userId: r.created_by, type: 'personal' });
                         const { spreadsheetId, url } = await createGoogleSheetReport(
-                            "My Archive", 
-                            reportData.headers, 
-                            reportData.rows, 
+                            "My Archive",
+                            reportData.headers,
+                            reportData.rows,
                             existing?.spreadsheetId
                         );
 
