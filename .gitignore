@@ -13,3 +13,4 @@ admin_stats.json.bak*
 .idea/
 dist/
 build/
+google-credentials.json

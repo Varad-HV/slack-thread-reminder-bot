@@ -3,7 +3,10 @@ const { App } = require('@slack/bolt');
 const cron = require('node-cron');
 const { v4: uuidv4 } = require('uuid');
 const mongoose = require('mongoose');
-const http = require('http'); // Added for Render Free Tier workaround
+const http = require('http');
+const { google } = require('googleapis');
+const fs = require('fs');
+const path = require('path');
 
 // --- Render Web Service Workaround ---
 // Render expects a web service to bind to a port.
@@ -62,6 +65,14 @@ const GlobalStatsSchema = new mongoose.Schema({
     channels_used: [String]
 });
 const GlobalStatsModel = mongoose.model('GlobalStats', GlobalStatsSchema);
+
+const UserSheetSchema = new mongoose.Schema({
+    userId: String,
+    type: { type: String, enum: ['personal', 'admin'] },
+    spreadsheetId: String,
+    url: String
+});
+const UserSheetModel = mongoose.model('UserSheet', UserSheetSchema);
 
 // --- In-Memory Cache (Synced with DB) ---
 let reminders = [];
@@ -177,6 +188,73 @@ const getStartupGreeting = (user) => {
 };
 
 /**
+ * GOOGLE SHEETS SERVICE
+ */
+const getGoogleAuth = () => {
+    const credentialsPath = path.join(__dirname, 'google-credentials.json');
+    if (!fs.existsSync(credentialsPath)) {
+        throw new Error('Google credentials file missing');
+    }
+    return new google.auth.GoogleAuth({
+        keyFile: credentialsPath,
+        scopes: ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive.file'],
+    });
+};
+
+const createGoogleSheetReport = async (title, headers, rows, spreadsheetId = null) => {
+    try {
+        const auth = getGoogleAuth();
+        const sheets = google.sheets({ version: 'v4', auth });
+        const drive = google.drive({ version: 'v3', auth });
+
+        let finalSpreadsheetId = spreadsheetId;
+        let url;
+
+        if (!finalSpreadsheetId) {
+            // 1. Create Spreadsheet if new
+            const spreadsheet = await sheets.spreadsheets.create({
+                resource: {
+                    properties: { title: `${title} - Follow-up Dashboard` },
+                },
+            });
+            finalSpreadsheetId = spreadsheet.data.spreadsheetId;
+            url = spreadsheet.data.spreadsheetUrl;
+
+            // 2. Set Permissions (Anyone with link - WRITER)
+            await drive.permissions.create({
+                fileId: finalSpreadsheetId,
+                resource: {
+                    role: 'writer',
+                    type: 'anyone',
+                },
+            });
+        } else {
+            // 1. Clear Existing Data if updating
+            await sheets.spreadsheets.values.clear({
+                spreadsheetId: finalSpreadsheetId,
+                range: 'Sheet1!A1:Z1000',
+            });
+            url = `https://docs.google.com/spreadsheets/d/${finalSpreadsheetId}`;
+        }
+
+        // 2. Write Data
+        await sheets.spreadsheets.values.update({
+            spreadsheetId: finalSpreadsheetId,
+            range: 'Sheet1!A1',
+            valueInputOption: 'RAW',
+            resource: {
+                values: [headers, ...rows],
+            },
+        });
+
+        return { spreadsheetId: finalSpreadsheetId, url };
+    } catch (e) {
+        console.error('❌ Google Sheets Error:', e);
+        throw e;
+    }
+};
+
+/**
  * MINIMALISTIC & SEXY: Task Tracker Card
  */
 const buildThreadBlock = (reminder) => {
@@ -226,42 +304,44 @@ const buildThreadBlock = (reminder) => {
 // 3. Reporting & CSV Engine
 // ---------------------------
 
-const generateCSVContent = (creatorId) => {
+const generateReportData = (creatorId) => {
     const myReminders = reminders.filter(r => r.created_by === creatorId);
     if (myReminders.length === 0) return null;
-    let csv = "Created At,Assignee,Status,Pings,Priority,ETA,Report Reason,Jira Link,Slack Link,Note\n";
-    myReminders.forEach(r => {
+
+    const headers = ["Created At", "Assignee", "Status", "Pings", "Frequency (Min)", "ETA", "Report Reason", "Jira Link", "Slack Link", "Note"];
+    const rows = myReminders.map(r => {
         const stats = getAdminStats();
         const report = (stats.reports || []).find(rep => rep.reminder_id === r.id);
         const reportReason = report ? report.type : "None";
-        const row = [
+        return [
             new Date(r.created_at).toISOString().split('T')[0],
-            `"${r.assigneeName}"`,
+            r.assigneeName,
             r.status,
             r.pingCount,
-            r.priority || 'N/A',
+            r.frequencyMinutes || 'N/A',
             r.eta || 'Not Set',
             reportReason,
             r.jira || 'Not Provided',
             getThreadLink(r.channel, r.thread_ts),
-            `"${r.note.replace(/"/g, '""')}"`
+            r.note
         ];
-        csv += row.join(",") + "\n";
     });
-    return csv;
+    return { headers, rows };
 };
 
 // sendDashboardAndCSV supports an optional stagger offset (ms)
 const sendDashboardAndCSV = async (userId, offsetMs = 0) => {
     const sendNow = async () => {
-        const myThreads = reminders.filter(r => r.created_by === userId && r.active);
-        if (myThreads.length === 0) {
+        const allReminders = reminders.filter(r => r.created_by === userId);
+        const myThreads = allReminders.filter(r => r.active);
+
+        if (allReminders.length === 0) {
             try {
                 // Feedback for empty state
                 const dm = await app.client.conversations.open({ users: userId });
                 await app.client.chat.postMessage({
                     channel: dm.channel.id,
-                    text: "You don't have any active reminders tracking right now. Create one with the shortcut!"
+                    text: "You don't have any reminders tracking right now. Create one with the shortcut!"
                 });
             } catch (e) { console.error("Could not send empty report DM", e); }
             return;
@@ -272,9 +352,14 @@ const sendDashboardAndCSV = async (userId, offsetMs = 0) => {
             const channelId = dm.channel.id;
 
             const blocks = [
-                { type: "header", text: { type: "plain_text", text: "📋 Your Jira Dashboard" } },
-                { type: "section", text: { type: "mrkdwn", text: `Hi <@${userId}>, you have *${myThreads.length}* active tasks.` } }
+                { type: "header", text: { type: "plain_text", text: "📋 Your Jira Dashboard" } }
             ];
+
+            if (myThreads.length > 0) {
+                blocks.push({ type: "section", text: { type: "mrkdwn", text: `Hi <@${userId}>, you have *${myThreads.length}* active tasks.` } });
+            } else {
+                blocks.push({ type: "section", text: { type: "mrkdwn", text: `Hi <@${userId}>, you have no active tasks, but you can view your history below.` } });
+            }
 
             myThreads.slice(0, 5).forEach(r => {
                 blocks.push({
@@ -289,13 +374,38 @@ const sendDashboardAndCSV = async (userId, offsetMs = 0) => {
 
             await app.client.chat.postMessage({ channel: channelId, blocks, text: "Dashboard is ready" });
 
-            const csvContent = generateCSVContent(userId);
-            if (csvContent) {
-                await app.client.files.uploadV2({
-                    channel_id: channelId,
-                    content: csvContent,
-                    filename: `Task_Report.csv`,
-                    initial_comment: "📊 *Task Data Export:* Your tasks are ready for analysis."
+            await app.client.chat.postMessage({ channel: channelId, blocks, text: "Dashboard is ready" });
+
+            const reportData = generateReportData(userId);
+            if (reportData) {
+                // Find potential existing sheet
+                const existing = await UserSheetModel.findOne({ userId, type: 'personal' });
+                const { spreadsheetId, url } = await createGoogleSheetReport(
+                    reportData.headers.length > 0 ? "Personal Report" : "My Dashboard", 
+                    reportData.headers, 
+                    reportData.rows, 
+                    existing?.spreadsheetId
+                );
+
+                if (!existing) {
+                    await new UserSheetModel({ userId, type: 'personal', spreadsheetId, url }).save();
+                }
+
+                await app.client.chat.postMessage({
+                    channel: channelId,
+                    text: `📊 *Task Data Export:* Your tasks are ready for analysis.\n🔗 <${url}|View Google Sheet>`,
+                    blocks: [
+                        {
+                            type: "section",
+                            text: { type: "mrkdwn", text: "📊 *Task Data Export:* Your tasks are ready for analysis." },
+                            accessory: {
+                                type: "button",
+                                text: { type: "plain_text", text: "Open Google Sheet 🔗" },
+                                url: url,
+                                action_id: "open_sheet"
+                            }
+                        }
+                    ]
                 });
             }
         } catch (e) { console.error("Report Fail", e); }
@@ -383,7 +493,7 @@ const sendAdminDashboard = async () => {
                 const hoursActive = Math.round((new Date() - new Date(r.created_at)) / (1000 * 60 * 60));
                 blocks.push({
                     type: "section",
-                    text: { type: "mrkdwn", text: `*"${r.note}"*\n👤 <@${r.assignee}> | 🔥 ${r.pingCount} pings | ⏱️ ${hoursActive}h active | 🎯 ${r.priority}\n<${getThreadLink(r.channel, r.thread_ts)}|→ View Thread>` }
+                    text: { type: "mrkdwn", text: `*"${r.note}"*\n👤 <@${r.assignee}> | 🔥 ${r.pingCount} pings | ⏱️ ${hoursActive}h active\n<${getThreadLink(r.channel, r.thread_ts)}|→ View Thread>` }
                 });
             });
         } else {
@@ -414,19 +524,43 @@ const sendAdminDashboard = async () => {
 
         // Open DM(s) and send with staggering to avoid rate limits
         const recipients = ADMIN_USER_IDS.filter(Boolean);
-        const csvContent = generateAdminCSV(metrics, escalations);
         recipients.forEach((userId, idx) => {
             const delay = idx * 1500; // 1.5 seconds per user
             setTimeout(async () => {
                 try {
                     const dm = await app.client.conversations.open({ users: userId });
                     await app.client.chat.postMessage({ channel: dm.channel.id, blocks, text: "Admin Dashboard" });
-                    if (csvContent) {
-                        await app.client.files.uploadV2({
-                            channel_id: dm.channel.id,
-                            content: csvContent,
-                            filename: `Admin_Report_${new Date().toISOString().split('T')[0]}.csv`,
-                            initial_comment: "📊 *Complete Admin Export*"
+                    
+                    const adminReportData = generateAdminReportData(metrics, escalations);
+                    if (adminReportData) {
+                        // Persistent global admin sheet
+                        const existingAdmin = await UserSheetModel.findOne({ type: 'admin' });
+                        const { spreadsheetId, url } = await createGoogleSheetReport(
+                            "Admin Dashboard", 
+                            adminReportData.headers, 
+                            adminReportData.rows, 
+                            existingAdmin?.spreadsheetId
+                        );
+
+                        if (!existingAdmin) {
+                            await new UserSheetModel({ userId: 'GLOBAL_ADMIN', type: 'admin', spreadsheetId, url }).save();
+                        }
+
+                        await app.client.chat.postMessage({
+                            channel: dm.channel.id,
+                            text: `📊 *Complete Admin Export*\n🔗 <${url}|View Google Sheet>`,
+                            blocks: [
+                                {
+                                    type: "section",
+                                    text: { type: "mrkdwn", text: "📊 *Complete Admin Export*" },
+                                    accessory: {
+                                        type: "button",
+                                        text: { type: "plain_text", text: "Open Google Sheet 🔗" },
+                                        url: url,
+                                        action_id: "open_admin_sheet"
+                                    }
+                                }
+                            ]
                         });
                     }
                 } catch (err) {
@@ -573,16 +707,13 @@ const generateRecommendations = (metrics, escalations, reportAnalytics) => {
     return recommendations.length > 0 ? recommendations.map((r, i) => `${i + 1}. ${r}`).join('\n') : "✅ Everything looks good!";
 };
 
-/**
- * Generate comprehensive admin CSV with all metrics
- */
-const generateAdminCSV = (metrics, escalations) => {
+const generateAdminReportData = (metrics, escalations) => {
     const escalationIds = new Set(escalations.map(r => r.id));
     const stats = getAdminStats();
     const reports = (stats && stats.reports) ? stats.reports : [];
-    let csv = "Ticket,Assignee,Reporter,Status,Pings,Priority,Created,Resolution Days,Channel,Thread Link,Blocker Reason,Reported As,Escalated,Assignee Efficiency,Jira\n";
-
-    reminders.forEach(r => {
+    
+    const headers = ["Ticket", "Assignee", "Reporter", "Status", "Pings", "Frequency", "Created", "Resolution Days", "Channel", "Thread Link", "Blocker Reason", "Reported As", "Escalated", "Assignee Efficiency", "Jira"];
+    const rows = reminders.map(r => {
         const assigneeData = metrics.assigneeMetrics[r.assignee];
         const resolutionDays = r.status === 'RESOLVED'
             ? ((new Date(r.resolved_at || new Date()) - new Date(r.created_at)) / (1000 * 60 * 60 * 24)).toFixed(1)
@@ -592,27 +723,26 @@ const generateAdminCSV = (metrics, escalations) => {
         const report = reports.find(rep => rep.reminder_id === r.id);
         const reportReason = report ? report.type : 'None';
 
-        const row = [
-            `"${r.note.replace(/"/g, '""')}"`,
-            `"${r.assigneeName}"`,
-            `"${r.creatorName}"`,
+        return [
+            r.note,
+            r.assigneeName,
+            r.creatorName,
             r.status,
             r.pingCount,
-            r.priority || 'N/A',
+            r.frequencyMinutes ? `${r.frequencyMinutes}m` : 'N/A',
             new Date(r.created_at).toISOString().split('T')[0],
             resolutionDays,
             r.channel,
             getThreadLink(r.channel, r.thread_ts),
-            r.blockerReason ? `"${r.blockerReason.replace(/"/g, '""')}"` : 'None',
+            r.blockerReason || 'None',
             reportReason,
             isEscalated,
             efficiency,
             r.jira || 'N/A'
         ];
-        csv += row.join(",") + "\n";
     });
 
-    return csv;
+    return { headers, rows };
 };
 
 // ---------------------------
@@ -635,14 +765,14 @@ app.shortcut('set_thread_reminder', async ({ shortcut, ack, client }) => {
             blocks: [
                 { type: 'input', block_id: 'assignee_block', element: { type: 'users_select', action_id: 'assignee' }, label: { type: 'plain_text', text: 'Assignee' } },
                 {
-                    type: 'input', block_id: 'priority_block', element: {
-                        type: 'static_select', action_id: 'priority', options: [
-                            { text: { type: 'plain_text', text: '🔴 Critical - Every 2 hours' }, value: 'Critical' },
-                            { text: { type: 'plain_text', text: '🟠 High - Every 6 hours' }, value: 'High' },
-                            { text: { type: 'plain_text', text: '🟡 Medium - Daily morning' }, value: 'Medium' },
-                            { text: { type: 'plain_text', text: '🟢 Low - Every 2 days' }, value: 'Low' }
+                    type: 'input', block_id: 'frequency_block', element: {
+                        type: 'static_select', action_id: 'frequency', options: [
+                            { text: { type: 'plain_text', text: '📅 Every Day' }, value: '1440' },
+                            { text: { type: 'plain_text', text: '⏳ Every 2 Days' }, value: '2880' },
+                            { text: { type: 'plain_text', text: '🗓️ Every 3 Days' }, value: '4320' },
+                            { text: { type: 'plain_text', text: '🕒 Once a Week' }, value: '10080' }
                         ]
-                    }, label: { type: 'plain_text', text: 'Priority Level' }
+                    }, label: { type: 'plain_text', text: 'Reminder Frequency' }
                 },
                 { type: 'input', block_id: 'note_block', element: { type: 'plain_text_input', action_id: 'note' }, label: { type: 'plain_text', text: 'Context/Goal' } },
                 { type: 'input', block_id: 'jira_block', element: { type: 'plain_text_input', action_id: 'jira' }, label: { type: 'plain_text', text: 'Jira URL' }, optional: true }
@@ -660,15 +790,7 @@ app.view('create_reminder', async ({ ack, body, view, client }) => {
         client.users.info({ user: body.user.id })
     ]);
 
-    const priority = view.state.values.priority_block.priority.selected_option.value;
-    let frequencyMinutes;
-    switch (priority) {
-        case 'Critical': frequencyMinutes = 120; break;
-        case 'High': frequencyMinutes = 360; break;
-        case 'Medium': frequencyMinutes = 1440; break;
-        case 'Low': frequencyMinutes = 2880; break;
-        default: frequencyMinutes = 1440;
-    }
+    const frequencyMinutes = parseInt(view.state.values.frequency_block.frequency.selected_option.value);
 
     const reminder = {
         id: uuidv4(),
@@ -681,7 +803,6 @@ app.view('create_reminder', async ({ ack, body, view, client }) => {
         creatorAvatar: creatorInfo.user.profile.image_192,
         created_at: new Date(),
         frequencyMinutes: frequencyMinutes,
-        priority: priority,
         note: view.state.values.note_block.note.value,
         jira: view.state.values.jira_block.jira?.value || '',
         status: 'ACTIVE',
@@ -698,28 +819,19 @@ app.view('create_reminder', async ({ ack, body, view, client }) => {
     // Update global stats in the database
     updateGlobalStats(metadata.channel);
 
-    // Education message - engaging with personality
+    // Education message - concise and clean
     await client.chat.postMessage({
         channel: reminder.channel,
         thread_ts: reminder.thread_ts,
-        text: `Follow-up created`,
+        text: `Follow-up set`,
         username: `${creatorInfo.user.real_name} (via JiraPing)`,
         icon_url: creatorInfo.user.profile.image_192,
         blocks: [
-            { type: "header", text: { type: "plain_text", text: "Follow-up Reminder Set ✨" } },
             {
                 type: "section",
                 text: {
                     type: "mrkdwn",
-                    text: `Hi <@${assigneeId}> 👋\n\nA reminder for this has been set by <@${body.user.id}>. We'll check in regularly to keep things moving.\n\nPro tip: Setting a target date means we'll stop bugging you until the final day. Smart move!`
-                }
-            },
-            { type: "divider" },
-            {
-                type: "section",
-                text: {
-                    type: "mrkdwn",
-                    text: "*What you can do:*\n✅ *Done* - Task complete\n🛑 *Blocked* - Hit a blocker? Pause reminders\n📅 *Target Date* - Tell us when you'll finish. We'll remind you 1 day before\n🚩 *Report* - Something's off? Flag it"
+                    text: `Hi <@${assigneeId}> 👋\n\nA follow-up reminder has been set by <@${body.user.id}>.\n\n• *Done* → Mark complete\n• *Blocked* → Pause reminders\n• *Target Date* → Set ETA (I'll remind you 1 day before)`
                 }
             }
         ]
@@ -1035,7 +1147,7 @@ cron.schedule('* * * * *', async () => {
                                     channel: dm.channel.id,
                                     text: `⚠️ ESCALATION ALERT`,
                                     blocks: [
-                                        { type: "section", text: { type: "mrkdwn", text: `🚨 Ticket in limbo: "*${r.note}*" for <@${r.assignee}> has reached ${r.pingCount} pings.\n*Priority:* ${r.priority} | *Assigned by:* <@${r.created_by}>\n<${getThreadLink(r.channel, r.thread_ts)}|View Thread>` } }
+                                        { type: "section", text: { type: "mrkdwn", text: `🚨 Ticket in limbo: "*${r.note}*" for <@${r.assignee}> has reached ${r.pingCount} pings.\n*Assigned by:* <@${r.created_by}>\n<${getThreadLink(r.channel, r.thread_ts)}|View Thread>` } }
                                     ]
                                 });
                             } catch (dmErr) {
@@ -1137,15 +1249,37 @@ cron.schedule('0 0 * * *', async () => {
             const delay = i * 1500; // stagger
             setTimeout(async () => {
                 try {
-                    // Generate per-creator CSV BEFORE deletion and send as final archive
-                    const csv = generateCSVContent(r.created_by);
-                    if (csv) {
+                    // Generate per-creator report BEFORE deletion and send as final archive
+                    const reportData = generateReportData(r.created_by);
+                    if (reportData) {
+                        const existing = await UserSheetModel.findOne({ userId: r.created_by, type: 'personal' });
+                        const { spreadsheetId, url } = await createGoogleSheetReport(
+                            "My Archive", 
+                            reportData.headers, 
+                            reportData.rows, 
+                            existing?.spreadsheetId
+                        );
+
+                        if (!existing) {
+                            await new UserSheetModel({ userId: r.created_by, type: 'personal', spreadsheetId, url }).save();
+                        }
+
                         const dm = await app.client.conversations.open({ users: r.created_by });
-                        await app.client.files.uploadV2({
-                            channel_id: dm.channel.id,
-                            content: csv,
-                            filename: `Final_Archive_${new Date().toISOString().split('T')[0]}.csv`,
-                            initial_comment: `📦 Final Archive: reminder "${r.note}" is being purged from the system.`
+                        await app.client.chat.postMessage({
+                            channel: dm.channel.id,
+                            text: `📦 *Final Archive:* Reminder "${r.note}" is being purged.\n🔗 <${url}|View Final Archive>`,
+                            blocks: [
+                                {
+                                    type: "section",
+                                    text: { type: "mrkdwn", text: `📦 *Final Archive:* Reminder "${r.note}" is being purged from the system.` },
+                                    accessory: {
+                                        type: "button",
+                                        text: { type: "plain_text", text: "View Archive 🔗" },
+                                        url: url,
+                                        action_id: "open_archive"
+                                    }
+                                }
+                            ]
                         });
                     }
                 } catch (e) {
@@ -1326,7 +1460,7 @@ app.command('/admin-escalations', async ({ ack, body, client }) => {
         const hoursActive = (new Date() - new Date(r.created_at)) / (1000 * 60 * 60);
         blocks.push({
             type: "section",
-            text: { type: "mrkdwn", text: `*"${r.note}"*\n👤 <@${r.assignee}> | 📍 ${r.priority} | 📊 ${r.pingCount} pings | ⏱️ Active ${Math.round(hoursActive)}h\n<${getThreadLink(r.channel, r.thread_ts)}|View Thread>` }
+            text: { type: "mrkdwn", text: `*"${r.note}"*\n👤 <@${r.assignee}> | 📊 ${r.pingCount} pings | ⏱️ Active ${Math.round(hoursActive)}h\n<${getThreadLink(r.channel, r.thread_ts)}|View Thread>` }
         });
     });
 
