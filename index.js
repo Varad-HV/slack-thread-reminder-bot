@@ -191,14 +191,29 @@ const getStartupGreeting = (user) => {
  * GOOGLE SHEETS SERVICE
  */
 const getGoogleAuth = () => {
-    const credentialsPath = path.join(__dirname, 'google-credentials.json');
-    if (!fs.existsSync(credentialsPath)) {
-        throw new Error('Google credentials file missing');
+    // 1. Try environment variable (Standard for Deployed/CI environments)
+    if (process.env.GOOGLE_CREDENTIALS_JSON) {
+        try {
+            const credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON);
+            return new google.auth.GoogleAuth({
+                credentials,
+                scopes: ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive'],
+            });
+        } catch (e) {
+            throw new Error(`Failed to parse GOOGLE_CREDENTIALS_JSON: ${e.message}`);
+        }
     }
-    return new google.auth.GoogleAuth({
-        keyFile: credentialsPath,
-        scopes: ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive'],
-    });
+
+    // 2. Fallback to local file (Standard for Local Development)
+    const credentialsPath = path.join(__dirname, 'google-credentials.json');
+    if (fs.existsSync(credentialsPath)) {
+        return new google.auth.GoogleAuth({
+            keyFile: credentialsPath,
+            scopes: ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive'],
+        });
+    }
+
+    throw new Error('Google credentials missing. Set GOOGLE_CREDENTIALS_JSON env var or add google-credentials.json to root.');
 };
 
 const createGoogleSheetReport = async (title, headers, rows, spreadsheetId = null) => {
