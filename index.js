@@ -7,6 +7,7 @@ const http = require('http');
 const { google } = require('googleapis');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 // --- Render Web Service Workaround ---
 // Render expects a web service to bind to a port.
@@ -191,45 +192,125 @@ const getStartupGreeting = (user) => {
  * GOOGLE SHEETS SERVICE
  */
 const getGoogleAuth = () => {
-    // 1. Try environment variable (Standard for Deployed/CI environments)
+    let credentials;
+    
+    // 1. Load raw credentials
     if (process.env.GOOGLE_CREDENTIALS_JSON) {
         try {
-            const credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON);
-            return new google.auth.GoogleAuth({
-                credentials,
-                scopes: ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive'],
-            });
+            credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON);
         } catch (e) {
             throw new Error(`Failed to parse GOOGLE_CREDENTIALS_JSON: ${e.message}`);
         }
+    } else {
+        const credentialsPath = path.join(__dirname, 'google-credentials.json');
+        if (fs.existsSync(credentialsPath)) {
+            credentials = JSON.parse(fs.readFileSync(credentialsPath, 'utf8'));
+        }
     }
 
-    // 2. Fallback to local file (Standard for Local Development)
-    const credentialsPath = path.join(__dirname, 'google-credentials.json');
-    if (fs.existsSync(credentialsPath)) {
-        return new google.auth.GoogleAuth({
-            keyFile: credentialsPath,
-            scopes: ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive'],
-        });
+    if (!credentials) {
+        throw new Error('Google credentials missing. Set GOOGLE_CREDENTIALS_JSON env var or add google-credentials.json to root.');
     }
 
-    throw new Error('Google credentials missing. Set GOOGLE_CREDENTIALS_JSON env var or add google-credentials.json to root.');
+    // 🛡️ NUCLEAR HEALER: Reconstruct the private key to fix any formatting/newline issues
+    try {
+        if (credentials.private_key) {
+            // Extract raw base64 data (ignoring all junk/newlines)
+            const b64Body = credentials.private_key
+                .replace(/-----BEGIN PRIVATE KEY-----/, '')
+                .replace(/-----END PRIVATE KEY-----/, '')
+                .replace(/\\n/g, '')   // Remove literal \n strings
+                .replace(/\s/g, '');   // Remove all whitespace
+            
+            const derBuffer = Buffer.from(b64Body, 'base64');
+            const privateKey = crypto.createPrivateKey({
+                key: derBuffer,
+                format: 'der',
+                type: 'pkcs8'
+            });
+            credentials.private_key = privateKey.export({
+                format: 'pem',
+                type: 'pkcs8'
+            });
+        }
+    } catch (healError) {
+        console.warn('⚠️ Google Key Healer encountered an issue (non-critical if key is already perfect):', healError.message);
+    }
+
+    return new google.auth.GoogleAuth({
+        credentials,
+        scopes: [
+            'https://www.googleapis.com/auth/spreadsheets',
+            'https://www.googleapis.com/auth/drive.file' // Restricted scope for security
+        ],
+    });
 };
 
-const createGoogleSheetReport = async (title, headers, rows, spreadsheetId = null) => {
+/**
+ * Aesthetic Sheet Formatter
+ */
+const formatGoogleSheet = async (sheets, spreadsheetId, sheetId = 0) => {
+    try {
+        await sheets.spreadsheets.batchUpdate({
+            spreadsheetId,
+            resource: {
+                requests: [
+                    // 1. Bold Headers & Background Color
+                    {
+                        repeatCell: {
+                            range: { sheetId, startRowIndex: 0, endRowIndex: 1 },
+                            cell: {
+                                userEnteredFormat: {
+                                    backgroundColor: { red: 0.1, green: 0.1, blue: 0.2 }, // Dark Blue
+                                    textFormat: { color: { red: 1, green: 1, blue: 1 }, bold: true, fontSize: 11 },
+                                    horizontalAlignment: 'CENTER'
+                                }
+                            },
+                            fields: 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)'
+                        }
+                    },
+                    // 2. Freeze Header Row
+                    {
+                        updateSheetProperties: {
+                            properties: { sheetId, gridProperties: { frozenRowCount: 1 } },
+                            fields: 'gridProperties.frozenRowCount'
+                        }
+                    },
+                    // 3. Auto-Resize Columns
+                    {
+                        autoResizeDimensions: {
+                            dimensions: { sheetId, dimension: 'COLUMNS', startIndex: 0, endIndex: 20 }
+                        }
+                    }
+                ]
+            }
+        });
+    } catch (e) {
+        console.error('⚠️ Sheet Formatting Error:', e.message);
+    }
+};
+
+const createGoogleSheetReport = async (title, headers, rows, spreadsheetId = null, overwrite = true) => {
     try {
         const auth = getGoogleAuth();
         const sheets = google.sheets({ version: 'v4', auth });
         const drive = google.drive({ version: 'v3', auth });
 
         let finalSpreadsheetId = spreadsheetId;
+        const ADMIN_ID_ENV = process.env.ADMIN_SPREADSHEET_ID;
+
+        // If this is an admin report and we have a master ID, use it!
+        if (title.toLowerCase().includes('admin') && ADMIN_ID_ENV) {
+            finalSpreadsheetId = ADMIN_ID_ENV;
+        }
+
         let url;
 
         if (!finalSpreadsheetId) {
             // 1. Create Spreadsheet if new
             const spreadsheet = await sheets.spreadsheets.create({
                 resource: {
-                    properties: { title: `${title} - Follow-up Dashboard` },
+                    properties: { title: `${title} - Dashboard` },
                 },
             });
             finalSpreadsheetId = spreadsheet.data.spreadsheetId;
@@ -244,23 +325,35 @@ const createGoogleSheetReport = async (title, headers, rows, spreadsheetId = nul
                 },
             });
         } else {
-            // 1. Clear Existing Data if updating (clears first 5000 rows, all columns)
-            await sheets.spreadsheets.values.clear({
-                spreadsheetId: finalSpreadsheetId,
-                range: 'A1:Z5000', 
-            });
             url = `https://docs.google.com/spreadsheets/d/${finalSpreadsheetId}`;
+            // If overwrite is enabled, clear the sheet first
+            if (overwrite) {
+                await sheets.spreadsheets.values.clear({
+                    spreadsheetId: finalSpreadsheetId,
+                    range: 'Sheet1!A1:Z5000', 
+                });
+            }
         }
 
         // 2. Write Data
-        await sheets.spreadsheets.values.update({
+        const method = overwrite ? 'update' : 'append';
+        const params = {
             spreadsheetId: finalSpreadsheetId,
             range: 'Sheet1!A1',
-            valueInputOption: 'RAW',
+            valueInputOption: 'USER_ENTERED',
             resource: {
                 values: [headers, ...rows],
             },
-        });
+        };
+
+        if (overwrite) {
+            await sheets.spreadsheets.values.update(params);
+        } else {
+            await sheets.spreadsheets.values.append(params);
+        }
+
+        // 3. Apply Professional Styling
+        await formatGoogleSheet(sheets, finalSpreadsheetId);
 
         return { spreadsheetId: finalSpreadsheetId, url };
     } catch (e) {
@@ -558,28 +651,24 @@ const sendAdminDashboard = async () => {
                     if (adminReportData) {
                         try {
                             // Persistent global admin sheet
-                            const existingAdmin = await UserSheetModel.findOne({ type: 'admin' });
                             const { spreadsheetId, url } = await createGoogleSheetReport(
                                 "Admin Dashboard", 
                                 adminReportData.headers, 
-                                adminReportData.rows, 
-                                existingAdmin?.spreadsheetId
+                                adminReportData.rows,
+                                null, // Pass null so it checks for ADMIN_SPREADSHEET_ID in env
+                                true  // Overwrite enabled for real-time snapshot
                             );
-
-                            if (!existingAdmin) {
-                                await new UserSheetModel({ userId: 'GLOBAL_ADMIN', type: 'admin', spreadsheetId, url }).save();
-                            }
 
                             await app.client.chat.postMessage({
                                 channel: dm.channel.id,
-                                text: `📊 *Complete Admin Export*\n🔗 <${url}|View Google Sheet>`,
+                                text: `📊 *Aesthetic Admin Dashboard Sync*\n🔗 <${url}|View Master Spreadsheet>`,
                                 blocks: [
                                     {
                                         type: "section",
-                                        text: { type: "mrkdwn", text: "📊 *Complete Admin Export*" },
+                                        text: { type: "mrkdwn", text: "📊 *Aesthetic Admin Dashboard Sync*\nYour master spreadsheet has been updated with the latest metrics." },
                                         accessory: {
                                             type: "button",
-                                            text: { type: "plain_text", text: "Open Google Sheet 🔗" },
+                                            text: { type: "plain_text", text: "Open Master Sheet 🔗" },
                                             url: url,
                                             action_id: "open_admin_sheet"
                                         }
