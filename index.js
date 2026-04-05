@@ -232,9 +232,9 @@ const getHFSummary = async (rawText) => {
 
     try {
         const response = await axios.post(
-            "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2",
+            `https://router.huggingface.co/hf-inference/models/mistralai/Mistral-7B-Instruct-v0.2`,
             {
-                inputs: `<s>[INST] You are a professional project manager. Summarize the following Slack thread into a concise status report for a manager. Highlight the current goal, progress made, and any unresolved blockers. Keep it under 150 words. \n\nTHREAD:\n${rawText} [/INST]`,
+                inputs: `[INST] You are a professional project manager. Summarize the following Slack thread into a concise status report for a manager. Highlight the current goal, progress made, and any unresolved blockers. Keep it under 150 words. \n\nTHREAD:\n${rawText} [/INST]`,
                 parameters: { max_new_tokens: 500, temperature: 0.7 }
             },
             { headers: { Authorization: `Bearer ${token}` } }
@@ -480,7 +480,6 @@ const buildThreadBlock = (reminder) => {
             { type: "button", text: { type: "plain_text", text: "Report" }, action_id: "report_ticket", value: reminder.id }
         );
     } else if (!reminder.active && reminder.status !== 'RESOLVED') {
-        // Always show Resume when paused
         actions.push({ type: "button", text: { type: "plain_text", text: "🚀 Resume" }, action_id: "resume_nudges", value: reminder.id });
     }
 
@@ -1752,6 +1751,37 @@ app.action('request_thread_recap', async ({ ack, body, action, client }) => {
             thread_ts: body.container.thread_ts || r.thread_ts,
             text: errorMsg
         });
+    }
+});
+
+app.action('admin_delete_reminder', async ({ ack, body, action, client }) => {
+    await ack();
+    const ADMIN_IDS = (process.env.ADMIN_USER_IDS || '').split(',');
+    
+    // Security: Only admins can delete data
+    if (!ADMIN_IDS.includes(body.user.id)) {
+        await client.chat.postEphemeral({
+            channel: body.channel.id,
+            user: body.user.id,
+            text: "🚫 *Access Denied:* Only administrators can permanently delete follow-up data."
+        });
+        return;
+    }
+
+    const rIdx = reminders.findIndex(rem => rem.id === action.value);
+    if (rIdx !== -1) {
+        const r = reminders[rIdx];
+        try {
+            await ReminderModel.deleteOne({ id: r.id });
+            reminders.splice(rIdx, 1);
+            await client.chat.postEphemeral({
+                channel: body.channel.id,
+                user: body.user.id,
+                text: `🗑️ *Permanent Delete:* Reminder "${r.note}" has been removed from the system.`
+            });
+        } catch (e) {
+            console.error('Delete fail', e);
+        }
     }
 });
 
