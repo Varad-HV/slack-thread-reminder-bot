@@ -424,11 +424,11 @@ const formatGoogleSheet = async (sheets, spreadsheetId, sheetId = 0) => {
                             cell: {
                                 userEnteredFormat: {
                                     backgroundColor: { red: 0.1, green: 0.1, blue: 0.2 }, // Dark Blue
-                                    textFormat: { color: { red: 1, green: 1, blue: 1 }, bold: true, fontSize: 11 },
+                                    textFormat: { foregroundColor: { red: 1, green: 1, blue: 1 }, bold: true, fontSize: 11 },
                                     horizontalAlignment: 'CENTER'
                                 }
                             },
-                            fields: 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)'
+                            fields: 'userEnteredFormat(backgroundColor,textFormat(foregroundColor,bold,fontSize),horizontalAlignment)'
                         }
                     },
                     // 2. Freeze Header Row
@@ -680,7 +680,15 @@ const sendDashboardAndCSV = async (userId, offsetMs = 0) => {
                     }
                 }
             } catch (aiErr) {
-                console.error("AI Suggestion skipped in dashboard:", aiErr.message);
+                if (aiErr.data?.error === 'not_in_channel') {
+                    blocks.push({ type: "divider" });
+                    blocks.push({
+                        type: "context",
+                        elements: [{ type: "mrkdwn", text: `💡 *AI Tip:* Invite me to the channel to enable AI suggestions for your top task.` }]
+                    });
+                } else {
+                    console.error("AI Suggestion skipped in dashboard:", aiErr.message);
+                }
             }
 
             await app.client.chat.postMessage({ channel: channelId, blocks, text: "Dashboard is ready" });
@@ -719,7 +727,6 @@ const sendDashboardAndCSV = async (userId, offsetMs = 0) => {
                         });
                     } catch (sheetErr) {
                         console.error("Personal Sheet Fail", sheetErr);
-                        // SILENT FALLBACK: If Sheets fail, automatically send the CSV
                         const csvContent = jsonToCsv(reportData.headers, reportData.rows);
                         const fileName = `JiraPing_Report_${new Date().toISOString().split('T')[0]}.csv`;
                         await app.client.files.uploadV2({
@@ -727,15 +734,13 @@ const sendDashboardAndCSV = async (userId, offsetMs = 0) => {
                             content: csvContent,
                             filename: fileName,
                             title: 'Your Jira Follow-up Report',
-                            initial_comment: "📊 *Note:* Google Sheets sync is currently unavailable (check your credentials). Falling back to CSV for your report."
+                            initial_comment: "📊 *Note:* Google Sheets sync is currently unavailable. Falling back to CSV."
                         });
                     }
                 } else {
-                    // Regular user: generate and upload CSV
                     try {
                         const csvContent = jsonToCsv(reportData.headers, reportData.rows);
                         const fileName = `JiraPing_Report_${new Date().toISOString().split('T')[0]}.csv`;
-
                         await app.client.files.uploadV2({
                             channel_id: channelId,
                             content: csvContent,
@@ -745,10 +750,6 @@ const sendDashboardAndCSV = async (userId, offsetMs = 0) => {
                         });
                     } catch (csvErr) {
                         console.error("CSV Upload Fail", csvErr);
-                        await app.client.chat.postMessage({
-                            channel: channelId,
-                            text: `⚠️ *Export Error:* I couldn't generate your CSV report.\n*Reason:* ${csvErr.message}`
-                        });
                     }
                 }
             }
@@ -920,7 +921,11 @@ const sendAdminDashboard = async () => {
                         }
                     }
                 } catch (err) {
-                    console.error('Could not send admin dashboard to', userId, err);
+                    if (err.data?.error === 'user_not_found' || err.data?.error === 'channel_not_found') {
+                        console.warn(`[SKIP] Admin ${userId} not found in workspace. Check .env`);
+                    } else {
+                        console.error('Could not send admin dashboard to', userId, err.message);
+                    }
                 }
             }, delay);
         });
@@ -1930,9 +1935,8 @@ app.command('/sa-report', async ({ ack, body }) => {
 // Admin commands for deep insights and bulk operations
 app.command('/ping-admin', async ({ ack, body, client }) => {
     await ack();
-    const ADMIN_IDS = (process.env.ADMIN_USER_IDS || '').split(',');
     
-    if (!ADMIN_IDS.includes(body.user_id)) {
+    if (!ADMIN_USER_IDS.includes(body.user_id)) {
         await client.chat.postEphemeral({
             channel: body.channel_id, user: body.user_id,
             text: "You don't have permission to use this command."
