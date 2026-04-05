@@ -281,7 +281,47 @@ const getHFSummary = async (rawText) => {
         }
         return null;
     } catch (e) {
-        console.error('AI Brain Fail:', e.response?.data || e.message);
+        console.error('AI Brain Fail:', e.message);
+        return null;
+    }
+};
+
+/**
+ * 💡 AI SUGGESTION: Proactive next steps for reporters
+ */
+const getAISuggestion = async (rawText) => {
+    const token = process.env.HUGGINGFACE_API_KEY;
+    if (!token) return null;
+
+    try {
+        const response = await axios.post(
+            "https://router.huggingface.co/v1/chat/completions",
+            {
+                model: "meta-llama/Llama-3.1-8B-Instruct",
+                messages: [
+                    { 
+                        role: "system", 
+                        content: "You are a proactive assistant for a solutions engineer. Based on the Slack thread provided, suggest ONE concise, actionable next step for the REPORTER (not the assignee) to help move the task forward.\n" +
+                                 "CRITICAL RULES:\n" +
+                                 "1. DO NOT use markdown. Plain text only.\n" +
+                                 "2. Keep it to exactly one sentence.\n" +
+                                 "3. If nothing is needed, say 'No immediate action required on your part.'\n" +
+                                 "4. Be professional and helpful."
+                    },
+                    { role: "user", content: `THREAD CONTEXT:\n${rawText}` }
+                ],
+                max_tokens: 100,
+                temperature: 0.2
+            },
+            { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" } }
+        );
+
+        if (response.data?.choices?.[0]?.message?.content) {
+            return response.data.choices[0].message.content.trim();
+        }
+        return null;
+    } catch (e) {
+        console.error('AI Suggestion Fail:', e.message);
         return null;
     }
 };
@@ -616,6 +656,32 @@ const sendDashboardAndCSV = async (userId, offsetMs = 0) => {
                     ]
                 });
             });
+
+            // 💡 AI DAILY SUGGESTION: Proactive tip for the top priority task
+            try {
+                const topThread = myThreads.sort((a, b) => b.pingCount - a.pingCount)[0];
+                if (topThread) {
+                    const threadResp = await app.client.conversations.replies({
+                        channel: topThread.channel,
+                        ts: topThread.thread_ts,
+                        limit: 30
+                    });
+                    const humanMessages = threadResp.messages.filter(m => !m.bot_id && !m.service_type);
+                    if (humanMessages.length > 0) {
+                        const cleanText = anonymizeThread(humanMessages);
+                        const suggestion = await getAISuggestion(cleanText);
+                        if (suggestion && !suggestion.includes('No immediate action')) {
+                            blocks.push({ type: "divider" });
+                            blocks.push({
+                                type: "section",
+                                text: { type: "mrkdwn", text: `💡 *AI Daily Suggestion for "${topThread.note}":*\n${suggestion}` }
+                            });
+                        }
+                    }
+                }
+            } catch (aiErr) {
+                console.error("AI Suggestion skipped in dashboard:", aiErr.message);
+            }
 
             await app.client.chat.postMessage({ channel: channelId, blocks, text: "Dashboard is ready" });
 
@@ -1732,16 +1798,6 @@ app.action('request_thread_recap', async ({ ack, body, action, client }) => {
             ? participantIds.map(id => `<@${id}>`).join(', ') 
             : `<@${r.assignee}>`;
 
-        // 📑 SYNTHESIZE EXECUTIVE SUMMARY
-        let execSummary = `<@${r.assignee}> is actively working on "${r.note}". `;
-        if (r.status === 'BLOCKED') {
-            execSummary = `🚨 *ATTENTION:* Progress on "${r.note}" is currently *STALLED* due to: ${r.blockerReason}.`;
-        } else if (r.eta) {
-            execSummary += `Currently on track for the target date of *${r.eta}*.`;
-        } else {
-            execSummary += `The latest update suggests steady progress is being made.`;
-        }
-
         // 🤯 REAL AI SUMMARY (Privacy-First)
         let aiSummary = null;
         const hfToken = process.env.HUGGINGFACE_API_KEY;
@@ -1764,8 +1820,7 @@ app.action('request_thread_recap', async ({ ack, body, action, client }) => {
                     text: {
                         type: "mrkdwn",
                         text: `*🧵 Thread Synthesis:* ${r.note}\n\n` +
-                              (aiSummary || latestHumanMsg.text.substring(0, 200)) + 
-                              `\n\n*Status Note:* ${execSummary}`
+                              (aiSummary || latestHumanMsg.text.substring(0, 200))
                     }
                 },
             ]
@@ -1902,6 +1957,9 @@ app.command('/ping-admin', async ({ ack, body, client }) => {
                 user: body.user_id,
                 text: `🧹 *Silent Sweep Complete:* Removed ${removed} reminders containing "test" from the system.`
             });
+            
+            // 🔄 Trigger dashboard refresh to sync Google Sheets immediately
+            await sendAdminDashboard();
         } catch (e) {
             console.error('Sweep fail', e);
         }
