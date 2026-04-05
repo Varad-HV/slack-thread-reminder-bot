@@ -49,7 +49,8 @@ const ReminderSchema = new mongoose.Schema({
     blockerReason: String,
     resolved_at: Date,
     lastActivityAt: Date,
-    lastAssigneeActivityAt: Date
+    lastAssigneeActivityAt: Date,
+    lastUpdateText: String
 });
 const ReminderModel = mongoose.model('Reminder', ReminderSchema);
 
@@ -1510,16 +1511,18 @@ cron.schedule('* * * * *', async () => {
             }
         }
 
-        const isWaitingOnSA = r.status === 'WAITING_ON_SA';
-        const target = isWaitingOnSA ? r.created_by : r.assignee;
+        const isWaitingOnReporter = r.status === 'WAITING_ON_REPORTER' || r.status === 'WAITING_ON_SA';
+        const target = isWaitingOnReporter ? r.created_by : r.assignee;
         const diff = (now - new Date(r.lastSent)) / 1000 / 60;
 
         if (diff >= r.frequencyMinutes) {
             if (r.dailyPingCount >= DAILY_PING_LIMIT) continue;
             try {
-                // Contextual message based on whether ETA exists
+                // Contextual message building
                 let contextMsg;
-                if (r.eta) {
+                if (isWaitingOnReporter) {
+                    contextMsg = `👋 <@${r.created_by}>, <@${r.assignee}> shared an update: _"${r.lastUpdateText || 'Check the thread'}"_. Any feedback to move this forward?`;
+                } else if (r.eta) {
                     contextMsg = `${getDiverseGreeting(target, r.pingCount)} quick status update on this? We have it targeted for ${r.eta}`;
                 } else {
                     contextMsg = `${getDiverseGreeting(target, r.pingCount)} any progress? If you can, drop a target date so we can plan around it 📅`;
@@ -1539,7 +1542,7 @@ cron.schedule('* * * * *', async () => {
 
                 await app.client.chat.postMessage({
                     channel: r.channel, thread_ts: r.thread_ts,
-                    text: "Friendly Check-in",
+                    text: isWaitingOnReporter ? "Feedback Requested" : "Friendly Check-in",
                     username: `${r.creatorName} (via JiraPing)`,
                     icon_url: icon_url,
                     blocks: [
@@ -2161,9 +2164,25 @@ app.event('message', async ({ event, client }) => {
     r.lastActivityAt = now;
 
     const isAssignee = event.user === r.assignee;
+    const isReporter = event.user === r.created_by;
+
     if (isAssignee) {
         console.log(`💬 Assignee Activity detected for reminder ${r.id}`);
         r.lastAssigneeActivityAt = now;
+        // Auto-toggle to waiting on reporter
+        if (r.status === 'ACTIVE') {
+            r.status = 'WAITING_ON_REPORTER';
+            r.lastUpdateText = event.text ? (event.text.length > 100 ? event.text.substring(0, 100) + '...' : event.text) : 'Replied to thread';
+            r.lastSent = now; // Reset ping timer so reporter gets a grace period
+        }
+    } else if (isReporter) {
+        console.log(`💬 Reporter Activity detected for reminder ${r.id}`);
+        // Auto-toggle back to active (assignee's turn)
+        if (r.status === 'WAITING_ON_REPORTER' || r.status === 'WAITING_ON_SA') {
+            r.status = 'ACTIVE';
+            r.lastUpdateText = ''; 
+            r.lastSent = now; // Reset ping timer for assignee
+        }
     }
 
     // 2. Adaptive Natural Language Parsing (NLP) - ONLY for Assignee
