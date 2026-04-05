@@ -234,7 +234,7 @@ const getHFSummary = async (rawText) => {
         const response = await axios.post(
             "https://router.huggingface.co/v1/chat/completions",
             {
-                model: "mistralai/Mistral-7B-Instruct-v0.2",
+                model: "meta-llama/Llama-3.1-8B-Instruct",
                 messages: [
                     { role: "system", content: "You are a professional project manager. Summarize the provided Slack thread into a concise status report. Highlight the original objective, key decisions made, and any pending actions. Limit to 120 words." },
                     { role: "user", content: `THREAD CONTEXT:\n${rawText}` }
@@ -1737,10 +1737,6 @@ app.action('request_thread_recap', async ({ ack, body, action, client }) => {
                               `\n\n*Status Note:* ${execSummary}`
                     }
                 },
-                {
-                    type: "context",
-                    elements: [{ type: "mrkdwn", text: "🛡️ _Privacy-Scrubbed (IDs/Emails removed before AI processing)_" }]
-                }
             ]
         });
     } catch (e) {
