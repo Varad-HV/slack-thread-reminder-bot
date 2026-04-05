@@ -46,7 +46,9 @@ const ReminderSchema = new mongoose.Schema({
     eta: String,
     etaNotified: Boolean,
     blockerReason: String,
-    resolved_at: Date
+    resolved_at: Date,
+    lastActivityAt: Date,
+    lastAssigneeActivityAt: Date
 });
 const ReminderModel = mongoose.model('Reminder', ReminderSchema);
 
@@ -63,7 +65,8 @@ const ReportModel = mongoose.model('Report', ReportSchema);
 const GlobalStatsSchema = new mongoose.Schema({
     key: { type: String, default: 'main' },
     reminders_created: { type: Number, default: 0 },
-    channels_used: [String]
+    channels_used: [String],
+    lastAdminReportSent: Date
 });
 const GlobalStatsModel = mongoose.model('GlobalStats', GlobalStatsSchema);
 
@@ -152,40 +155,52 @@ const app = new App({
 
 const getThreadLink = (channel, ts) => `https://slack.com/archives/${channel}/p${ts.replace('.', '')}`;
 
-const getStartupGreeting = (user) => {
-    // Current time in IST (UTC+5:30)
+const getDiverseGreeting = (user, pingCount = 0) => {
+    const morning = [
+        "Good morning! Just a tiny nudge at the top of your inbox.",
+        "Morning! Hope you have a coffee in hand ☕. Quick check-in on this.",
+        "Rise and shine! Popping in before the day gets too busy.",
+        "Hey there! Bumping this up so it doesn't get buried."
+    ];
+
+    const afternoon = [
+        "A little mid-day check-in! How's it going?",
+        "Afternoon nudge! Hope your day is treating you well.",
+        "Just sliding in with a quick status check. No rush!",
+        "Hey! Stopping by to see if there's any update here."
+    ];
+
+    const evening = [
+        "Evening! Checking in before we all wrap up for the day.",
+        "Wrapping up soon? Just wanted to keep this on the radar.",
+        "Hey! Hope you're having a productive one. Any news on this?",
+        "Just a late-day ping to see where we stand."
+    ];
+
+    const funny = [
+        "I promise I'm not a stalker, just a very dedicated robot helper! 🤖",
+        "knock knock! Who's there? Definitely not a finished task yet! (JK, checking in! 😂)",
+        "Help me, help you, help us all! Any updates on this one?",
+        "I'm like a boomerang... I keep coming back! 🪃 Status check?",
+        "If this task was a pizza, would it be out of the oven yet? 🍕",
+        "Just making sure this thread doesn't feel lonely out here! 🛰️"
+    ];
+
+    // Determine time-based category
     const now = new Date();
     const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
     const ist = new Date(utc + (3600000 * 5.5));
     const hour = ist.getHours();
 
-    const morningGreets = [
-        "Morning! Just leaving this here so it doesn't vanish into the abyss.",
-        "Hey! Gentle nudge on this whenever you have a second.",
-        "Morning. I know it's early, but this ticket missed you.",
-        "Bumping this up your inbox for today."
-    ];
+    let pool = funny;
+    if (pingCount < 3) {
+        if (hour < 12) pool = morning;
+        else if (hour >= 12 && hour <= 17) pool = afternoon;
+        else pool = evening;
+    }
 
-    const afternoonGreets = [
-        "Afternoon! Hope your day is going smoother than expected.",
-        "Just a casual mid-day check-in on this one.",
-        "Not to interrupt the flow, but any news here?",
-        "Dropping by to see if we can get this unblocked soon."
-    ];
-
-    const eveningGreets = [
-        "Evening! Checking in before we all call it a day.",
-        "Still going strong? Any updates before logging off?",
-        "Just a late ping to keep this on the radar for tomorrow.",
-        "Wrapping up? Let me know if you need anything from our end on this."
-    ];
-
-    let greetArray = eveningGreets;
-    if (hour < 12) greetArray = morningGreets;
-    else if (hour >= 12 && hour <= 16) greetArray = afternoonGreets;
-
-    const greet = greetArray[Math.floor(Math.random() * greetArray.length)];
-    return `${greet} <@${user}>,`;
+    const msg = pool[Math.floor(Math.random() * pool.length)];
+    return `${msg} <@${user}>,`;
 };
 
 /**
@@ -193,13 +208,32 @@ const getStartupGreeting = (user) => {
  */
 const getGoogleAuth = () => {
     let credentials;
+    let rawJson = process.env.GOOGLE_CREDENTIALS_JSON;
 
-    // 1. Load raw credentials
-    if (process.env.GOOGLE_CREDENTIALS_JSON) {
+    // 1. Smart Parser: Detect and fix common misformatting (escaped quotes, etc.)
+    if (rawJson) {
         try {
-            credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON);
+            // Test standard parsing
+            credentials = JSON.parse(rawJson);
         } catch (e) {
-            throw new Error(`Failed to parse GOOGLE_CREDENTIALS_JSON: ${e.message}`);
+            console.warn('⚠️ Standard JSON.parse failed, attempting Smart Cleanup...');
+            try {
+                // Remove extra backslashes before quotes, or unescape if double-encoded
+                let cleaned = rawJson
+                    .replace(/\\"/g, '"')    // Unescape quotes
+                    .replace(/\\n/g, '\n')   // Fix literal \n
+                    .replace(/\\\\/g, '\\'); // Fix double backslashes
+                
+                // If it starts/ends with extra quotes, strip them (sometimes happens with env vars)
+                if (cleaned.startsWith('"') && cleaned.endsWith('"')) {
+                    cleaned = cleaned.substring(1, cleaned.length - 1);
+                }
+                
+                credentials = JSON.parse(cleaned);
+                console.log('✅ Smart Parser successfully recovered Google Credentials!');
+            } catch (smartError) {
+                throw new Error(`Failed to parse GOOGLE_CREDENTIALS_JSON even with Smart Parser: ${smartError.message}`);
+            }
         }
     } else {
         const credentialsPath = path.join(__dirname, 'google-credentials.json');
@@ -241,7 +275,7 @@ const getGoogleAuth = () => {
         credentials,
         scopes: [
             'https://www.googleapis.com/auth/spreadsheets',
-            'https://www.googleapis.com/auth/drive.file' // Restricted scope for security
+            'https://www.googleapis.com/auth/drive.file'
         ],
     });
 };
@@ -438,6 +472,17 @@ const generateReportData = (creatorId) => {
 };
 
 // sendDashboardAndCSV supports an optional stagger offset (ms)
+const jsonToCsv = (headers, rows) => {
+    const csvRows = [headers.join(',')];
+    for (const row of rows) {
+        csvRows.push(row.map(val => {
+            const escaped = ('' + val).replace(/"/g, '""');
+            return `"${escaped}"`;
+        }).join(','));
+    }
+    return csvRows.join('\n');
+};
+
 const sendDashboardAndCSV = async (userId, offsetMs = 0) => {
     const sendNow = async () => {
         const allReminders = reminders.filter(r => r.created_by === userId);
@@ -445,7 +490,6 @@ const sendDashboardAndCSV = async (userId, offsetMs = 0) => {
 
         if (allReminders.length === 0) {
             try {
-                // Feedback for empty state
                 const dm = await app.client.conversations.open({ users: userId });
                 await app.client.chat.postMessage({
                     channel: dm.channel.id,
@@ -458,9 +502,10 @@ const sendDashboardAndCSV = async (userId, offsetMs = 0) => {
         try {
             const dm = await app.client.conversations.open({ users: userId });
             const channelId = dm.channel.id;
+            const isAdmin = ADMIN_USER_IDS.includes(userId);
 
             const blocks = [
-                { type: "header", text: { type: "plain_text", text: "📋 Your Jira Dashboard" } }
+                { type: "header", text: { type: "plain_text", text: isAdmin ? "📊 Admin Dashboard" : "📋 Your Jira Dashboard" } }
             ];
 
             if (myThreads.length > 0) {
@@ -484,42 +529,63 @@ const sendDashboardAndCSV = async (userId, offsetMs = 0) => {
 
             const reportData = generateReportData(userId);
             if (reportData) {
-                try {
-                    // Find potential existing sheet
-                    const existing = await UserSheetModel.findOne({ userId, type: 'personal' });
-                    const { spreadsheetId, url } = await createGoogleSheetReport(
-                        "Personal Dashboard",
-                        reportData.headers,
-                        reportData.rows,
-                        existing?.spreadsheetId
-                    );
+                if (isAdmin) {
+                    try {
+                        const existing = await UserSheetModel.findOne({ userId, type: 'personal' });
+                        const { spreadsheetId, url } = await createGoogleSheetReport(
+                            "Personal Dashboard",
+                            reportData.headers,
+                            reportData.rows,
+                            existing?.spreadsheetId
+                        );
 
-                    if (!existing) {
-                        await new UserSheetModel({ userId, type: 'personal', spreadsheetId, url }).save();
-                    }
+                        if (!existing) {
+                            await new UserSheetModel({ userId, type: 'personal', spreadsheetId, url }).save();
+                        }
 
-                    await app.client.chat.postMessage({
-                        channel: channelId,
-                        text: `📊 *Task Data Export:* Your tasks are ready for analysis.\n🔗 <${url}|View Google Sheet>`,
-                        blocks: [
-                            {
-                                type: "section",
-                                text: { type: "mrkdwn", text: "📊 *Task Data Export:* Your tasks are ready for analysis." },
-                                accessory: {
-                                    type: "button",
-                                    text: { type: "plain_text", text: "Open Google Sheet 🔗" },
-                                    url: url,
-                                    action_id: "open_sheet"
+                        await app.client.chat.postMessage({
+                            channel: channelId,
+                            text: `📊 *Task Data Export:* Your tasks are ready for analysis.\n🔗 <${url}|View Google Sheet>`,
+                            blocks: [
+                                {
+                                    type: "section",
+                                    text: { type: "mrkdwn", text: "📊 *Task Data Export:* Your tasks are ready for analysis." },
+                                    accessory: {
+                                        type: "button",
+                                        text: { type: "plain_text", text: "Open Google Sheet 🔗" },
+                                        url: url,
+                                        action_id: "open_sheet"
+                                    }
                                 }
-                            }
-                        ]
-                    });
-                } catch (sheetErr) {
-                    console.error("Personal Sheet Fail", sheetErr);
-                    await app.client.chat.postMessage({
-                        channel: channelId,
-                        text: `⚠️ *Google Sheet Error:* I couldn't generate your export link.\n*Reason:* ${sheetErr.message}\n_Please ensure the Google Sheets and Drive APIs are enabled for the Service Account._`
-                    });
+                            ]
+                        });
+                    } catch (sheetErr) {
+                        console.error("Personal Sheet Fail", sheetErr);
+                        await app.client.chat.postMessage({
+                            channel: channelId,
+                            text: `⚠️ *Google Sheet Error:* I couldn't generate your export link.\n*Reason:* ${sheetErr.message}`
+                        });
+                    }
+                } else {
+                    // Regular user: generate and upload CSV
+                    try {
+                        const csvContent = jsonToCsv(reportData.headers, reportData.rows);
+                        const fileName = `JiraPing_Report_${new Date().toISOString().split('T')[0]}.csv`;
+                        
+                        await app.client.files.uploadV2({
+                            channel_id: channelId,
+                            content: csvContent,
+                            filename: fileName,
+                            title: 'Your Jira Follow-up Report',
+                            initial_comment: "📊 Here is your Jira Follow-up report as a CSV file."
+                        });
+                    } catch (csvErr) {
+                        console.error("CSV Upload Fail", csvErr);
+                        await app.client.chat.postMessage({
+                            channel: channelId,
+                            text: `⚠️ *Export Error:* I couldn't generate your CSV report.\n*Reason:* ${csvErr.message}`
+                        });
+                    }
                 }
             }
         } catch (e) {
@@ -930,41 +996,34 @@ app.view('create_reminder', async ({ ack, body, view, client }) => {
         dailyPingCount: 0,
         active: true,
         lastSent: new Date(),
+        lastActivityAt: new Date(),
+        lastAssigneeActivityAt: new Date(0), // No activity yet
         etaNotified: false
     };
 
     reminders.push(reminder);
     saveToDb(reminders);
-
-    // Update global stats in the database
     updateGlobalStats(metadata.channel);
 
-    // Education message - concise and clean
-    await client.chat.postMessage({
-        channel: reminder.channel,
-        thread_ts: reminder.thread_ts,
-        text: `Follow-up set`,
-        username: `${creatorInfo.user.real_name} (via JiraPing)`,
-        icon_url: creatorInfo.user.profile.image_192,
-        blocks: [
-            {
-                type: "section",
-                text: {
-                    type: "mrkdwn",
-                    text: `Hi <@${assigneeId}> 👋\n\nA follow-up reminder has been set by <@${body.user.id}>.\n\n• *Done* → Mark complete\n• *Blocked* → Pause reminders\n• *Target Date* → Set ETA (I'll remind you 1 day before)`
-                }
+    // CONSOLIDATED CREATION MESSAGE (Education + Action Card)
+    const blocks = [
+        {
+            type: "section",
+            text: {
+                type: "mrkdwn",
+                text: `Hi <@${assigneeId}> 👋\n\nA follow-up reminder has been set by <@${body.user.id}>.\n\n• *Done* → Mark complete\n• *Blocked* → Pause reminders\n• *Target Date* → Set ETA (I'll remind you 1 day before)`
             }
-        ]
-    });
+        },
+        ...buildThreadBlock(reminder)
+    ];
 
-    // Send the action card separately so assignee can interact
     await client.chat.postMessage({
         channel: reminder.channel,
         thread_ts: reminder.thread_ts,
         username: `${creatorInfo.user.real_name} (via JiraPing)`,
         icon_url: creatorInfo.user.profile.image_192,
-        blocks: buildThreadBlock(reminder),
-        text: "Actions available"
+        blocks: blocks,
+        text: `Follow-up set for <@${assigneeId}>`
     });
 
     // Removed automatic delayed personal dashboard send to avoid noisy behavior in production
@@ -1164,8 +1223,37 @@ cron.schedule('* * * * *', async () => {
     // Respect working days/hours strictly in production
     if (!WORKING_DAYS.includes(day) || hour < WORKING_HOURS.start || hour >= WORKING_HOURS.end) return;
 
-    for (const r of reminders.filter(r => r.active)) {
-        if (r.status === 'BLOCKED' || r.status === 'WAITING_ON_SA') continue; // Pause on blocker or waiting
+    for (let i = reminders.length - 1; i >= 0; i--) {
+        const r = reminders[i];
+        if (!r.active) continue;
+
+        // 🛡️ GHOST PROTECTION: Check if reminder still exists in DB
+        const exists = await ReminderModel.exists({ id: r.id });
+        if (!exists) {
+            console.log(`👻 Cleanup: Removing reminder ${r.id} from memory (deleted from DB)`);
+            reminders.splice(i, 1);
+            continue;
+        }
+
+        // 🧠 SMART SILENCE (Observer Pattern)
+        const lastActivity = r.lastActivityAt ? new Date(r.lastActivityAt) : new Date(0);
+        const lastAssigneeActivity = r.lastAssigneeActivityAt ? new Date(r.lastAssigneeActivityAt) : new Date(0);
+        const lastSent = r.lastSent ? new Date(r.lastSent) : new Date(0);
+        
+        // A. Ongoing Discussion Standoff: Skip if ANY message was sent in last 30 mins
+        const minutesSinceActivity = (now - lastActivity) / 1000 / 60;
+        if (minutesSinceActivity < 30) {
+            console.log(`🤫 Silence: Skipping ping for ${r.id} due to recent discussion (${Math.round(minutesSinceActivity)}m ago)`);
+            continue;
+        }
+
+        // B. Recent Progress Silence: Skip if Assignee has messaged SINCE the last ping
+        if (lastAssigneeActivity > lastSent) {
+            console.log(`🤫 Silence: Skipping ping for ${r.id} because assignee has already replied since last ping.`);
+            continue;
+        }
+
+        if (r.status === 'BLOCKED' || r.status === 'WAITING_ON_SA') continue;
 
         // Special handling for Medium: only in the morning
         if (r.priority === 'Medium' && hour !== 9) continue;
@@ -1219,9 +1307,9 @@ cron.schedule('* * * * *', async () => {
                 // Contextual message based on whether ETA exists
                 let contextMsg;
                 if (r.eta) {
-                    contextMsg = `${getStartupGreeting(target)} quick status update on this? We have it targeted for ${r.eta}`;
+                    contextMsg = `${getDiverseGreeting(target, r.pingCount)} quick status update on this? We have it targeted for ${r.eta}`;
                 } else {
-                    contextMsg = `${getStartupGreeting(target)} any progress? If you can, drop a target date so we can plan around it 📅`;
+                    contextMsg = `${getDiverseGreeting(target, r.pingCount)} any progress? If you can, drop a target date so we can plan around it 📅`;
                 }
 
                 let icon_url = r.creatorAvatar;
@@ -1305,12 +1393,39 @@ cron.schedule('* * * * *', async () => {
     }
 });
 
-// Daily Reset for Ping Counts & Admin Dashboard
+// Daily Reset for Ping Counts & Admin Dashboard (Every 3 days)
 cron.schedule('0 9 * * 1-5', async () => {
     reminders.forEach(r => r.dailyPingCount = 0);
     saveToDb(reminders);
-    // Staggered admin send handled inside sendAdminDashboard
-    await sendAdminDashboard();
+    
+    const stats = await GlobalStatsModel.findOne({ key: 'main' });
+    const lastSent = stats?.lastAdminReportSent || new Date(0);
+    const threeDaysAgo = new Date();
+    threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
+
+    if (lastSent < threeDaysAgo) {
+        await sendAdminDashboard();
+        await GlobalStatsModel.findOneAndUpdate(
+            { key: 'main' },
+            { lastAdminReportSent: new Date() },
+            { upsert: true }
+        );
+        console.log('📊 Admin Dashboard sent (3-day cycle)');
+    }
+}, { timezone: "Asia/Kolkata" });
+
+// Daily SA report auto-send (Every morning at 10 AM IST)
+cron.schedule('0 10 * * 1-5', async () => {
+    console.log('📅 Starting Daily Auto SA Reports...');
+    const uniqueCreators = [...new Set(reminders.filter(r => r.active).map(r => r.created_by))];
+    
+    for (let i = 0; i < uniqueCreators.length; i++) {
+        const userId = uniqueCreators[i];
+        const delay = i * 2000; // 2 second stagger to avoid rate limits
+        setTimeout(async () => {
+            await sendDashboardAndCSV(userId);
+        }, delay);
+    }
 }, { timezone: "Asia/Kolkata" });
 
 // ---------------------------
@@ -1641,6 +1756,9 @@ app.view('submit_report', async ({ ack, body, view, client }) => {
         ticket: r.note,
         timestamp: new Date().toISOString()
     };
+    r.active = false;
+    r.status = 'REPORTED';
+    saveToDb(reminders);
     saveReport(report);
 
     // Funny messages based on reason
@@ -1671,6 +1789,121 @@ app.view('submit_report', async ({ ack, body, view, client }) => {
     });
 });
 
+// --- Conversation-Aware Intelligence (The Observer) ---
+
+app.event('message', async ({ event, client }) => {
+    // Only care about thread replies
+    if (!event.thread_ts) return;
+
+    const r = reminders.find(rem => rem.thread_ts === event.thread_ts && rem.active);
+    if (!r) return;
+
+    // 1. Update activity timestamps
+    const now = new Date();
+    r.lastActivityAt = now;
+    
+    const isAssignee = event.user === r.assignee;
+    if (isAssignee) {
+        console.log(`💬 Assignee Activity detected for reminder ${r.id}`);
+        r.lastAssigneeActivityAt = now;
+    }
+
+    // 2. Adaptive Natural Language Parsing (NLP) - ONLY for Assignee
+    if (isAssignee && event.text) {
+        const text = event.text.toLowerCase();
+        let adapted = false;
+
+        // A. ETA Detection (Monday, Tomorrow, etc.)
+        const dateMatch = text.match(/\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|tonight|next week)\b/i);
+        if (dateMatch) {
+            const dateStr = dateMatch[0].toLowerCase();
+            let targetDate = new Date();
+            
+            if (dateStr === 'tomorrow') targetDate.setDate(targetDate.getDate() + 1);
+            else if (dateStr === 'tonight') targetDate.setHours(20, 0, 0, 0);
+            else if (dateStr === 'next week') targetDate.setDate(targetDate.getDate() + 7);
+            else {
+                // Find next weekday
+                const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+                const targetDay = days.indexOf(dateStr);
+                const currentDay = targetDate.getDay();
+                let diff = targetDay - currentDay;
+                if (diff <= 0) diff += 7;
+                targetDate.setDate(targetDate.getDate() + diff);
+            }
+
+            const isoDate = targetDate.toISOString().split('T')[0];
+            r.eta = isoDate;
+            r.etaNotified = false;
+            console.log(`🎯 Adaptive ETA set to ${isoDate} for reminder ${r.id}`);
+            adapted = true;
+        }
+
+        // B. Frequency Detection (Every \d+ hours)
+        const freqMatch = text.match(/remind me every (\d+) (hour|day|minute)s?/i);
+        if (freqMatch) {
+            const val = parseInt(freqMatch[1]);
+            const unit = freqMatch[2].toLowerCase();
+            let minutes = val;
+            if (unit === 'hour') minutes = val * 60;
+            else if (unit === 'day') minutes = val * 1440;
+            
+            r.frequencyMinutes = minutes;
+            console.log(`⏲️ Adaptive Frequency set to ${minutes}m for reminder ${r.id}`);
+            adapted = true;
+        }
+
+        // C. Visual Confirmation & Sync
+        if (adapted) {
+            try {
+                // React to show "I heard you"
+                await client.reactions.add({
+                    channel: event.channel,
+                    timestamp: event.ts,
+                    name: 'mantelpiece_clock'
+                });
+
+                // Send ephemeral for clarity
+                await client.chat.postEphemeral({
+                    channel: event.channel,
+                    user: event.user,
+                    thread_ts: event.thread_ts,
+                    text: `🤖 *Adaptive Sync:* I've adjusted your reminder schedule based on your update. Keep it up!`
+                });
+            } catch (e) {
+                console.error('Feedback failed', e);
+            }
+        }
+    }
+
+    // 3. Smart Suggestion: Done/Fixed check
+    if (isAssignee && event.text && /\b(done|fixed|resolved|completed|closed)\b/i.test(event.text)) {
+        try {
+            await client.chat.postEphemeral({
+                channel: event.channel,
+                user: event.user,
+                thread_ts: event.thread_ts,
+                text: "I see you mentioned this might be done! Should I mark it as resolved?",
+                blocks: [
+                    {
+                        type: "section",
+                        text: { type: "mrkdwn", text: "✨ *Detected completion!* Should I stop tracking this reminder?" }
+                    },
+                    {
+                        type: "actions",
+                        elements: [
+                            { type: "button", text: { type: "plain_text", text: "Yes, Resolve! ✅" }, action_id: "stop_reminder", value: r.id, style: "primary" },
+                            { type: "button", text: { type: "plain_text", text: "No, ignore" }, action_id: "ignore_suggestion" }
+                        ]
+                    }
+                ]
+            });
+        } catch (e) { console.error('Suggestion failed', e); }
+    }
+
+    saveToDb(reminders);
+});
+
 // --- Initialization & Startup ---
 (async () => {
     try {
@@ -1688,12 +1921,15 @@ app.view('submit_report', async ({ ack, body, view, client }) => {
         const dbReminders = await ReminderModel.find({});
         reminders = dbReminders.map(r => r.toObject());
 
-        // Reset active pings on startup to prevent spam
+        // Reset active pings on startup to prevent spam & initialize tracking fields
         reminders.forEach(r => {
             if (r.active && r.status === 'ACTIVE') {
                 r.lastSent = new Date();
                 r.dailyPingCount = 0;
             }
+            // Ensure activity fields exist for old reminders
+            if (!r.lastActivityAt) r.lastActivityAt = new Date();
+            if (!r.lastAssigneeActivityAt) r.lastAssigneeActivityAt = new Date(0);
         });
 
         // Load Stats
