@@ -211,32 +211,31 @@ const getGoogleAuth = () => {
     let rawJson = (process.env.GOOGLE_CREDENTIALS_JSON || '').trim();
 
     if (rawJson) {
-        // 🛡️ RECURSIVE DECODER: Handles double/triple-encoded JSON common on Render/Heroku
+        // 🧪 BULLETPROOF RECURSIVE UNWRAPPER: Handles double/triple-encoded strings
         let current = rawJson;
         let attempts = 0;
         while (typeof current === 'string' && attempts < 5) {
             try {
+                // If it looks like a JSON string wrapped in another string, unwrap it.
+                // Examples: "\"{\\\"type\\\":...}\"" or "{\"type\":...}"
                 const parsed = JSON.parse(current);
                 if (parsed && typeof parsed === 'object') {
                     credentials = parsed;
                     break;
                 }
-                current = parsed; // Keep unwrapping
+                current = parsed; // Keep unwrapping if it's still a string
                 attempts++;
             } catch (e) {
-                // If it fails, try a aggressive cleanup before one last attempt
+                // Last ditch effort: basic string cleanup
                 try {
-                    // Remove wrapping quotes if they exist and try one last time
-                    if (current.startsWith('"') && current.endsWith('"')) {
-                        current = current.substring(1, current.length - 1);
-                        continue;
+                    let cleaned = current.trim();
+                    if (cleaned.startsWith('"') && cleaned.endsWith('"')) {
+                        cleaned = cleaned.substring(1, cleaned.length - 1);
                     }
-                    // Handle escaped quotes from manual copy-paste
-                    current = current.replace(/\\"/g, '"').replace(/\\n/g, '\n');
-                    const lastTry = JSON.parse(current);
-                    if (lastTry && typeof lastTry === 'object') credentials = lastTry;
-                } catch (inner) {
-                    throw new Error(`Failed to parse GOOGLE_CREDENTIALS_JSON: ${inner.message}. Position: ${inner.at || 'unknown'}`);
+                    cleaned = cleaned.replace(/\\"/g, '"').replace(/\\n/g, '\n');
+                    credentials = JSON.parse(cleaned);
+                } catch (lastErr) {
+                    throw new Error(`Google Credentials Parse Error: Please ensure your GOOGLE_CREDENTIALS_JSON environment variable is valid JSON content.`);
                 }
                 break;
             }
@@ -570,7 +569,7 @@ const sendDashboardAndCSV = async (userId, offsetMs = 0) => {
                         });
                     } catch (sheetErr) {
                         console.error("Personal Sheet Fail", sheetErr);
-                        // SILENT FALLBACK: If Sheets fail, automatically send the CSV for admins too
+                        // SILENT FALLBACK: If Sheets fail, automatically send the CSV
                         const csvContent = jsonToCsv(reportData.headers, reportData.rows);
                         const fileName = `JiraPing_Report_${new Date().toISOString().split('T')[0]}.csv`;
                         await app.client.files.uploadV2({
@@ -578,7 +577,7 @@ const sendDashboardAndCSV = async (userId, offsetMs = 0) => {
                             content: csvContent,
                             filename: fileName,
                             title: 'Your Jira Follow-up Report',
-                            initial_comment: "📊 *Note:* Google Sheets is currently unavailable. Falling back to CSV file for your report."
+                            initial_comment: "📊 *Note:* Google Sheets sync is currently unavailable (check your credentials). Falling back to CSV for your report."
                         });
                     }
                 } else {
@@ -758,7 +757,7 @@ const sendAdminDashboard = async () => {
                             });
                         } catch (adminSheetErr) {
                             console.error("Admin Sheet Fail", adminSheetErr);
-                            // SILENT FALLBACK: If Sheets fail, automatically send the CSV for admins too
+                            // SILENT FALLBACK: If Sheets fail, automatically send the CSV
                             const csvContent = jsonToCsv(adminReportData.headers, adminReportData.rows);
                             const fileName = `JiraPing_Admin_Summary_${new Date().toISOString().split('T')[0]}.csv`;
                             await app.client.files.uploadV2({
@@ -766,7 +765,7 @@ const sendAdminDashboard = async () => {
                                 content: csvContent,
                                 filename: fileName,
                                 title: 'Admin Master Summary Report',
-                                initial_comment: "📊 *Note:* Master Google Sheet is currently unavailable. Falling back to CSV file for your admin summary."
+                                initial_comment: "📊 *Note:* Master Google Sheet sync failed (check credentials). Falling back to CSV for your summary."
                             });
                         }
                     }
