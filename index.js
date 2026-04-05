@@ -570,25 +570,33 @@ const buildThreadBlock = (reminder) => {
         ACTIVE: '🟢',
         BLOCKED: '🔴',
         WAITING_ON_SA: '👤',
+        WAITING_ON_REPORTER: '👀',
         RESOLVED: '✅'
     };
 
     let statusText = reminder.status;
     if (reminder.status === 'BLOCKED') statusText += ` - ${reminder.blockerReason}`;
-    else if (reminder.status === 'WAITING_ON_SA') statusText += ` - Waiting on <@${reminder.created_by}>`;
+    else if (reminder.status === 'WAITING_ON_SA') statusText += ` - Waiting on SA/Creator`;
+    else if (reminder.status === 'WAITING_ON_REPORTER') statusText += ` - Waiting on Reporter feedback`;
     else if (reminder.eta) statusText = `ETA: ${reminder.eta}`;
     else if (reminder.status === 'RESOLVED') statusText = 'Completed 🎉';
 
     const actions = [];
-    // Show Done & Blocked only when active and not blocked/waiting
-    if (reminder.active && reminder.status !== 'BLOCKED' && reminder.status !== 'WAITING_ON_SA') {
-        actions.push(
-            { type: "button", text: { type: "plain_text", text: "Done" }, action_id: "stop_reminder", value: reminder.id, style: "primary" },
-            { type: "button", text: { type: "plain_text", text: "Blocked" }, action_id: "open_blocker_modal", value: reminder.id, style: "danger" },
-            { type: "button", text: { type: "plain_text", text: "ETA" }, action_id: "open_eta_modal", value: reminder.id }
-        );
-    } else if (!reminder.active && reminder.status !== 'RESOLVED') {
-        actions.push({ type: "button", text: { type: "plain_text", text: "🚀 Resume" }, action_id: "resume_nudges", value: reminder.id });
+    // Show Done, Blocked, ETA if the task is NOT resolved
+    if (reminder.status !== 'RESOLVED') {
+        const canShowMainActions = (reminder.active && reminder.status !== 'BLOCKED' && reminder.status !== 'WAITING_ON_SA');
+        // Include WAITING_ON_REPORTER in main actions
+        const isWaitingOnReporter = reminder.status === 'WAITING_ON_REPORTER';
+
+        if (canShowMainActions || isWaitingOnReporter) {
+            actions.push(
+                { type: "button", text: { type: "plain_text", text: "Done" }, action_id: "stop_reminder", value: reminder.id, style: "primary" },
+                { type: "button", text: { type: "plain_text", text: "Blocked" }, action_id: "open_blocker_modal", value: reminder.id, style: "danger" },
+                { type: "button", text: { type: "plain_text", text: "ETA" }, action_id: "open_eta_modal", value: reminder.id }
+            );
+        } else if (!reminder.active) {
+            actions.push({ type: "button", text: { type: "plain_text", text: "🚀 Resume" }, action_id: "resume_nudges", value: reminder.id });
+        }
     }
 
     // 🧵 Universal: Recap is always available for everyone
@@ -1250,7 +1258,14 @@ app.view('create_reminder', async ({ ack, body, view, client }) => {
 app.action('open_blocker_modal', async ({ ack, body, action, client }) => {
     await ack();
     const r = reminders.find(rem => rem.id === action.value);
-    if (!r || !r.active || r.status === 'RESOLVED') return;
+    if (!r || r.status === 'RESOLVED') {
+        await client.chat.postEphemeral({
+            channel: body.channel_id,
+            user: body.user.id,
+            text: !r ? "⚠️ *Reminder Not Found:* This task may have been deleted." : "✅ *Completed:* This task is already resolved."
+        });
+        return;
+    }
 
     // 🔒 Security Check
     if (body.user.id !== r.assignee) {
@@ -1325,9 +1340,14 @@ app.action('report_ticket', async ({ ack, body, action, client }) => {
     console.log(`[DEBUG] report_ticket clicked by ${body.user.id} for item ${action.value}`);
 
     const r = reminders.find(rem => rem.id === action.value);
-    if (!r) { console.log('[DEBUG] Report: Reminder not found'); return; }
-    if (!r.active) { console.log('[DEBUG] Report: Reminder inactive'); return; }
-    if (r.status === 'RESOLVED') { console.log('[DEBUG] Report: Reminder resolved'); return; }
+    if (!r || r.status === 'RESOLVED') {
+        await client.chat.postEphemeral({
+            channel: body.channel_id,
+            user: body.user.id,
+            text: !r ? "⚠️ *Reminder Not Found:* This task may have been deleted." : "✅ *Completed:* This task is already resolved."
+        });
+        return;
+    }
 
     try {
         await client.views.open({
@@ -1370,7 +1390,14 @@ app.action('report_ticket', async ({ ack, body, action, client }) => {
 app.action('open_eta_modal', async ({ ack, body, action, client }) => {
     await ack();
     const r = reminders.find(rem => rem.id === action.value);
-    if (!r || !r.active || r.status === 'RESOLVED') return;
+    if (!r || r.status === 'RESOLVED') {
+        await client.chat.postEphemeral({
+            channel: body.channel_id,
+            user: body.user.id,
+            text: !r ? "⚠️ *Reminder Not Found:* This task may have been deleted." : "✅ *Completed:* This task is already resolved."
+        });
+        return;
+    }
 
     // 🔒 Security Check
     if (body.user.id !== r.assignee) {
@@ -1914,9 +1941,15 @@ app.action('stop_reminder', async ({ ack, body, action, client }) => {
     console.log(`[DEBUG] stop_reminder clicked by ${body.user.id} for item ${action.value}`);
 
     const r = reminders.find(rem => rem.id === action.value);
-    if (!r) { console.log('[DEBUG] Reminder not found in memory'); return; }
-    if (!r.active) { console.log('[DEBUG] Reminder is not active'); return; }
-    if (r.status === 'RESOLVED') { console.log('[DEBUG] Reminder is already resolved'); return; }
+    if (!r) {
+        await client.chat.postEphemeral({
+            channel: body.channel.id,
+            user: body.user.id,
+            text: "⚠️ *Reminder Not Found:* This task may have been deleted or archived. Try running `/sa-report` to see your active tasks."
+        });
+        return;
+    }
+    if (r.status === 'RESOLVED') return; // redundant but safe
 
     // 🔒 Security Check: Only Assignee can mark as done
     if (body.user.id !== r.assignee) {
