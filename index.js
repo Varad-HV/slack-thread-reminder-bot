@@ -8,6 +8,7 @@ const { google } = require('googleapis');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const axios = require('axios');
 
 // --- Render Web Service Workaround ---
 // Render expects a web service to bind to a port.
@@ -1670,18 +1671,26 @@ app.action('request_thread_recap', async ({ ack, body, action, client }) => {
     if (!r) return;
 
     try {
-        // Fetch thread context
+        // Fetch thread context (Backward-Aware: reads history before bot was raised)
         const replies = await client.conversations.replies({
             channel: r.channel,
             ts: r.thread_ts,
-            limit: 20
+            limit: 100
         });
 
         const allMessages = replies.messages || [];
         
-        // 🧠 INTELLIGENT FILTERING: Ignore bot's own noise
-        const humanMessages = allMessages.filter(m => !m.bot_id && m.user && m.text);
-        const latestHumanMsg = humanMessages[humanMessages.length - 1] || { text: 'No updates yet', user: r.assignee };
+        // 🧠 INTELLIGENT FILTERING: Ignore bot's own noise and empty/ping messages
+        const humanMessages = allMessages.filter(m => {
+            if (m.bot_id) return false;
+            if (!m.text) return false;
+            const clean = m.text.trim();
+            // Ignore if the message is JUST a bot ping (e.g., "@Jira Ping")
+            if (clean.startsWith('<@') && clean.endsWith('>') && clean.length < 15) return false;
+            return true;
+        });
+
+        const latestHumanMsg = humanMessages[humanMessages.length - 1] || { text: 'No status updates found yet.', user: r.assignee };
         const participantIds = [...new Set(humanMessages.map(m => m.user))];
         const participants = participantIds.length > 0 
             ? participantIds.map(id => `<@${id}>`).join(', ') 
