@@ -1746,17 +1746,6 @@ cron.schedule('0 0 * * *', async () => {
     }
 }, { timezone: 'Asia/Kolkata' });
 
-app.message(async ({ message, client }) => {
-    if (!message.thread_ts || message.bot_id) return;
-    const r = reminders.find(rem => rem.thread_ts === message.thread_ts && rem.active);
-    if (r && message.user === r.assignee) {
-        if (['done', 'fixed', 'resolved'].some(k => message.text.toLowerCase().includes(k))) {
-            r.active = false; r.status = 'RESOLVED'; saveToDb(reminders);
-            await client.chat.postMessage({ channel: r.channel, thread_ts: r.thread_ts, blocks: buildThreadBlock(r), text: "🎉 Resolved!" });
-        }
-    }
-});
-
 // ---------------------------
 // 8. Global Actions
 // ---------------------------
@@ -2262,8 +2251,11 @@ app.event('message', async ({ event, client }) => {
     if (isAssignee && event.text) {
         const text = event.text.toLowerCase();
 
-        // A. Done detection
-        if (/\b(done|fixed|resolved|completed|closed)\b/i.test(text)) {
+        // A. Done detection: Requires word boundaries and short message length to avoid false positives
+        const isLikelyDone = /\b(done|fixed|resolved|completed|closed)\b/i.test(text);
+        const isShort = text.length < 50;
+
+        if (isLikelyDone && isShort) {
             try {
                 await client.chat.postEphemeral({
                     channel: event.channel,
@@ -2285,7 +2277,9 @@ app.event('message', async ({ event, client }) => {
         }
 
         // B. Blocker/Waiting detection
-        if (/\b(waiting|stuck|blocked|pending|dependency)\b/i.test(text)) {
+        // B. Blocker/Waiting detection: Same short-message constraint
+        const isLikelyBlocked = /\b(waiting|stuck|blocked|pending|dependency)\b/i.test(text);
+        if (isLikelyBlocked && isShort) {
             try {
                 await client.chat.postEphemeral({
                     channel: event.channel,
