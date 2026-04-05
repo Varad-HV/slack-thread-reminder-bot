@@ -232,23 +232,25 @@ const getHFSummary = async (rawText) => {
 
     try {
         const response = await axios.post(
-            `https://router.huggingface.co/hf-inference/models/mistralai/Mistral-7B-Instruct-v0.2`,
+            "https://router.huggingface.co/v1/chat/completions",
             {
-                inputs: `[INST] You are a professional project manager. Summarize the following Slack thread into a concise status report for a manager. Highlight the current goal, progress made, and any unresolved blockers. Keep it under 150 words. \n\nTHREAD:\n${rawText} [/INST]`,
-                parameters: { max_new_tokens: 500, temperature: 0.7 }
+                model: "mistralai/Mistral-7B-Instruct-v0.2",
+                messages: [
+                    { role: "system", content: "You are a professional project manager. Summarize the provided Slack thread into a concise status report. Highlight the original objective, key decisions made, and any pending actions. Limit to 120 words." },
+                    { role: "user", content: `THREAD CONTEXT:\n${rawText}` }
+                ],
+                max_tokens: 500,
+                temperature: 0.7
             },
-            { headers: { Authorization: `Bearer ${token}` } }
+            { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" } }
         );
 
-        if (Array.isArray(response.data) && response.data[0]?.generated_text) {
-            // Remove the prompt from the response if the model includes it
-            const fullText = response.data[0].generated_text;
-            const summary = fullText.split('[/INST]').pop().trim();
-            return summary;
+        if (response.data?.choices?.[0]?.message?.content) {
+            return response.data.choices[0].message.content.trim();
         }
         return null;
     } catch (e) {
-        console.error('AI Summary Engine Fail:', e.response?.data || e.message);
+        console.error('AI Brain Fail:', e.response?.data || e.message);
         return null;
     }
 };
@@ -475,13 +477,17 @@ const buildThreadBlock = (reminder) => {
         actions.push(
             { type: "button", text: { type: "plain_text", text: "Done" }, action_id: "stop_reminder", value: reminder.id, style: "primary" },
             { type: "button", text: { type: "plain_text", text: "Blocked" }, action_id: "open_blocker_modal", value: reminder.id, style: "danger" },
-            { type: "button", text: { type: "plain_text", text: "ETA" }, action_id: "open_eta_modal", value: reminder.id },
-            { type: "button", text: { type: "plain_text", text: "🧵 Recap" }, action_id: "request_thread_recap", value: reminder.id },
-            { type: "button", text: { type: "plain_text", text: "Report" }, action_id: "report_ticket", value: reminder.id }
+            { type: "button", text: { type: "plain_text", text: "ETA" }, action_id: "open_eta_modal", value: reminder.id }
         );
     } else if (!reminder.active && reminder.status !== 'RESOLVED') {
         actions.push({ type: "button", text: { type: "plain_text", text: "🚀 Resume" }, action_id: "resume_nudges", value: reminder.id });
     }
+
+    // 🧵 Universal: Recap is always available for everyone
+    actions.push({ type: "button", text: { type: "plain_text", text: "🧵 Recap" }, action_id: "request_thread_recap", value: reminder.id });
+
+    // 📎 Contextual: Report is usually available
+    actions.push({ type: "button", text: { type: "plain_text", text: "Report" }, action_id: "report_ticket", value: reminder.id });
 
     return [
         {
@@ -1840,6 +1846,54 @@ app.command('/sa-report', async ({ ack, body }) => {
 });
 
 // Admin commands for deep insights and bulk operations
+app.command('/ping-admin', async ({ ack, body, client }) => {
+    await ack();
+    const ADMIN_IDS = (process.env.ADMIN_USER_IDS || '').split(',');
+    
+    if (!ADMIN_IDS.includes(body.user_id)) {
+        await client.chat.postEphemeral({
+            channel: body.channel_id, user: body.user_id,
+            text: "You don't have permission to use this command."
+        });
+        return;
+    }
+
+    const commandText = body.text ? body.text.trim().toLowerCase() : '';
+
+    if (commandText === 'sweep') {
+        const initialCount = reminders.length;
+        try {
+            // 🧹 Perform the sweep in DB
+            await ReminderModel.deleteMany({ note: /test/i });
+            
+            // Sync memory
+            for (let i = reminders.length - 1; i >= 0; i--) {
+                if (reminders[i].note.toLowerCase().includes('test')) {
+                    reminders.splice(i, 1);
+                }
+            }
+            const removed = initialCount - reminders.length;
+
+            await client.chat.postEphemeral({
+                channel: body.channel_id,
+                user: body.user_id,
+                text: `🧹 *Silent Sweep Complete:* Removed ${removed} reminders containing "test" from the system.`
+            });
+        } catch (e) {
+            console.error('Sweep fail', e);
+            await client.chat.postEphemeral({
+                channel: body.channel_id, user: body.user_id,
+                text: "⚠️ Sweep failed. Please check the logs."
+            });
+        }
+    } else {
+        await client.chat.postEphemeral({
+            channel: body.channel_id, user: body.user_id,
+            text: "Available admin subcommands: `sweep` (removes all reminders containing 'test')"
+        });
+    }
+});
+
 app.command('/admin-stats', async ({ ack, body, client }) => {
     await ack();
     if (!ADMIN_USER_IDS.includes(body.user_id)) {
