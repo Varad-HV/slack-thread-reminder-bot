@@ -211,16 +211,38 @@ const getDiverseGreeting = (user, pingCount = 0) => {
  * 🛡️ PRIVACY SCRUBBER: Removes PII before sending to AI
  */
 const anonymizeThread = (messages) => {
-    return messages.map(m => {
-        let text = m.text || '';
-        // 1. Redact Slack IDs: <@U12345> -> [Member]
-        text = text.replace(/<@U[A-Z0-9]+>/g, '[Team Member]');
-        // 2. Redact Emails
-        text = text.replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g, '[Email]');
-        // 3. Redact Links (optional but safer)
-        text = text.replace(/https?:\/\/\S+/g, '[Link]');
-        return text;
-    }).join('\n');
+    // 🛠️ Filter out automated bot noise and boilerplate
+    const humanMessages = messages.filter(m => {
+        const text = m.text || '';
+        const botSignatures = [
+            'A follow-up reminder has been set',
+            'Done → Mark complete',
+            'Thread Recap for',
+            'Thread Synthesis',
+            'crushed this',
+            'crushed it',
+            'Follow-up Reminder Set'
+        ];
+        return !botSignatures.some(sig => text.includes(sig));
+    });
+
+    return humanMessages
+        .map(m => {
+            let text = m.text || '';
+            // ✂️ Strip standard Greetings
+            text = text.replace(/^Hi <@U[A-Z0-9]+>.*?\n\n/s, '');
+            
+            // 🔒 Redact PII
+            text = text.replace(/<@U[A-Z0-9]+>/g, '[Member]');
+            text = text.replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g, '[Email]');
+            text = text.replace(/https?:\/\/\S+/g, '[Link]');
+            
+            // 👤 Identify Speaker
+            const speaker = m.user === 'U07FPT7RN7K' ? 'Bot' : (m.user || 'User');
+            return `[${speaker}]: ${text.trim()}`;
+        })
+        .filter(msg => msg.split(']: ')[1]?.length > 2) // Ignore nearly empty messages
+        .join('\n');
 };
 
 /**
@@ -236,11 +258,20 @@ const getHFSummary = async (rawText) => {
             {
                 model: "meta-llama/Llama-3.1-8B-Instruct",
                 messages: [
-                    { role: "system", content: "You are a professional project manager. Summarize the provided Slack thread into a concise status report. Highlight the original objective, key decisions made, and any pending actions. Limit to 120 words." },
+                    { 
+                        role: "system", 
+                        content: "You are a professional project manager. Summarize the provided Slack thread into a plain-text status report.\n" +
+                                 "CRITICAL RULES:\n" +
+                                 "1. DO NOT use any markdown formatting like **bold** or __underline__ or asterisks. Use plain text ONLY.\n" +
+                                 "2. Focus ONLY on human updates, deadlines, and technical facts.\n" +
+                                 "3. BE REALISTIC. If a human says a bug is fixed or unreproducible, report that as the conclusion. Do not suggest 'next steps' that contradict the human.\n" +
+                                 "4. Limit to 3 short paragraphs: CONTEXT, CURRENT STATUS, and CONCLUSION.\n" +
+                                 "5. Max 100 words."
+                    },
                     { role: "user", content: `THREAD CONTEXT:\n${rawText}` }
                 ],
-                max_tokens: 500,
-                temperature: 0.7
+                max_tokens: 400,
+                temperature: 0.2
             },
             { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" } }
         );
@@ -1859,17 +1890,13 @@ app.command('/ping-admin', async ({ ack, body, client }) => {
     if (commandText === 'sweep') {
         const initialCount = reminders.length;
         try {
-            // 🧹 Perform the sweep in DB
             await ReminderModel.deleteMany({ note: /test/i });
-            
-            // Sync memory
             for (let i = reminders.length - 1; i >= 0; i--) {
                 if (reminders[i].note.toLowerCase().includes('test')) {
                     reminders.splice(i, 1);
                 }
             }
             const removed = initialCount - reminders.length;
-
             await client.chat.postEphemeral({
                 channel: body.channel_id,
                 user: body.user_id,
@@ -1877,10 +1904,6 @@ app.command('/ping-admin', async ({ ack, body, client }) => {
             });
         } catch (e) {
             console.error('Sweep fail', e);
-            await client.chat.postEphemeral({
-                channel: body.channel_id, user: body.user_id,
-                text: "⚠️ Sweep failed. Please check the logs."
-            });
         }
     } else {
         await client.chat.postEphemeral({
@@ -1890,6 +1913,7 @@ app.command('/ping-admin', async ({ ack, body, client }) => {
     }
 });
 
+// Admin commands for deep insights and bulk operations
 app.command('/admin-stats', async ({ ack, body, client }) => {
     await ack();
     if (!ADMIN_USER_IDS.includes(body.user_id)) {
