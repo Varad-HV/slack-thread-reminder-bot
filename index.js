@@ -429,6 +429,7 @@ const buildThreadBlock = (reminder) => {
             { type: "button", text: { type: "plain_text", text: "Done" }, action_id: "stop_reminder", value: reminder.id, style: "primary" },
             { type: "button", text: { type: "plain_text", text: "Blocked" }, action_id: "open_blocker_modal", value: reminder.id, style: "danger" },
             { type: "button", text: { type: "plain_text", text: "ETA" }, action_id: "open_eta_modal", value: reminder.id },
+            { type: "button", text: { type: "plain_text", text: "🧵 Recap" }, action_id: "request_thread_recap", value: reminder.id },
             { type: "button", text: { type: "plain_text", text: "Report" }, action_id: "report_ticket", value: reminder.id }
         );
     } else if (!reminder.active && reminder.status !== 'RESOLVED') {
@@ -585,7 +586,7 @@ const sendDashboardAndCSV = async (userId, offsetMs = 0) => {
                     try {
                         const csvContent = jsonToCsv(reportData.headers, reportData.rows);
                         const fileName = `JiraPing_Report_${new Date().toISOString().split('T')[0]}.csv`;
-                        
+
                         await app.client.files.uploadV2({
                             channel_id: channelId,
                             content: csvContent,
@@ -1259,10 +1260,10 @@ cron.schedule('* * * * *', async () => {
         const lastActivity = r.lastActivityAt ? new Date(r.lastActivityAt) : new Date(0);
         const lastAssigneeActivity = r.lastAssigneeActivityAt ? new Date(r.lastAssigneeActivityAt) : new Date(0);
         const lastSent = r.lastSent ? new Date(r.lastSent) : new Date(0);
-        
-        // A. Ongoing Discussion Standoff: Skip if ANY message was sent in last 30 mins
+
+        // A. Ongoing Discussion Standoff: Skip if ANY message was sent in last 60 mins
         const minutesSinceActivity = (now - lastActivity) / 1000 / 60;
-        if (minutesSinceActivity < 30) {
+        if (minutesSinceActivity < 60) {
             console.log(`🤫 Silence: Skipping ping for ${r.id} due to recent discussion (${Math.round(minutesSinceActivity)}m ago)`);
             continue;
         }
@@ -1417,7 +1418,7 @@ cron.schedule('* * * * *', async () => {
 cron.schedule('0 9 * * 1-5', async () => {
     reminders.forEach(r => r.dailyPingCount = 0);
     saveToDb(reminders);
-    
+
     const stats = await GlobalStatsModel.findOne({ key: 'main' });
     const lastSent = stats?.lastAdminReportSent || new Date(0);
     const threeDaysAgo = new Date();
@@ -1438,7 +1439,7 @@ cron.schedule('0 9 * * 1-5', async () => {
 cron.schedule('0 10 * * 1-5', async () => {
     console.log('📅 Starting Daily Auto SA Reports...');
     const uniqueCreators = [...new Set(reminders.filter(r => r.active).map(r => r.created_by))];
-    
+
     for (let i = 0; i < uniqueCreators.length; i++) {
         const userId = uniqueCreators[i];
         const delay = i * 2000; // 2 second stagger to avoid rate limits
@@ -1613,6 +1614,60 @@ app.action('cancel_call', async ({ ack, body, action, client }) => {
         await client.chat.postMessage({
             channel: r.channel, thread_ts: r.thread_ts,
             text: `Call request cancelled by <@${body.user.id}>.`
+        });
+    }
+});
+
+app.action('request_thread_recap', async ({ ack, body, action, client }) => {
+    await ack();
+    const r = reminders.find(rem => rem.id === action.value);
+    if (!r) return;
+
+    try {
+        // Fetch thread context
+        const replies = await client.conversations.replies({
+            channel: r.channel,
+            ts: r.thread_ts,
+            limit: 15
+        });
+
+        const messages = replies.messages || [];
+        const lastMsg = messages[messages.length - 1];
+        const participants = [...new Set(messages.map(m => `<@${m.user}>`))].join(', ');
+
+        let statusDesc = `*Status:* ${r.status}`;
+        if (r.eta) statusDesc += ` (Target: ${r.eta})`;
+        if (r.status === 'BLOCKED') statusDesc += `\n*Blocker:* ${r.blockerReason}`;
+
+        await client.chat.postEphemeral({
+            channel: body.channel.id,
+            user: body.user.id,
+            thread_ts: body.container.thread_ts || r.thread_ts,
+            text: `🧵 *Thread Recap*`,
+            blocks: [
+                {
+                    type: "section",
+                    text: {
+                        type: "mrkdwn",
+                        text: `*🧵 Thread Recap for "${r.note}"*\n\n` +
+                              `🎯 *Original Goal:* ${r.note}\n` +
+                              `🚦 ${statusDesc}\n` +
+                              `👥 *Participants:* ${participants}\n` +
+                              `💬 *Last Update:* "${lastMsg.text.substring(0, 100)}${lastMsg.text.length > 100 ? '...' : ''}"`
+                    }
+                },
+                {
+                    type: "context",
+                    elements: [{ type: "mrkdwn", text: "This summary is private and visible only to you." }]
+                }
+            ]
+        });
+    } catch (e) {
+        console.error('Recap failed', e);
+        await client.chat.postEphemeral({
+            channel: body.channel.id,
+            user: body.user.id,
+            text: "⚠️ Sorry, I couldn't generate a recap right now. Check my permissions or try again later."
         });
     }
 });
@@ -1827,7 +1882,7 @@ app.event('message', async ({ event, client }) => {
     // 1. Update activity timestamps
     const now = new Date();
     r.lastActivityAt = now;
-    
+
     const isAssignee = event.user === r.assignee;
     if (isAssignee) {
         console.log(`💬 Assignee Activity detected for reminder ${r.id}`);
@@ -1838,15 +1893,17 @@ app.event('message', async ({ event, client }) => {
     if (isAssignee && event.text) {
         const text = event.text.toLowerCase();
         let adapted = false;
+        let feedbackMsg = '';
 
-        // A. ETA Detection (Monday, Tomorrow, etc.)
-        const dateMatch = text.match(/\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|tonight|next week)\b/i);
+        // A. ETA Detection (EOD, EOB, Friday, Tomorrow, etc.)
+        const dateMatch = text.match(/\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|tonight|next week|eod|eob|after lunch)\b/i);
         if (dateMatch) {
             const dateStr = dateMatch[0].toLowerCase();
             let targetDate = new Date();
-            
+
             if (dateStr === 'tomorrow') targetDate.setDate(targetDate.getDate() + 1);
-            else if (dateStr === 'tonight') targetDate.setHours(20, 0, 0, 0);
+            else if (dateStr === 'tonight' || dateStr === 'eod' || dateStr === 'eob') targetDate.setHours(19, 0, 0, 0);
+            else if (dateStr === 'after lunch') targetDate.setHours(14, 0, 0, 0);
             else if (dateStr === 'next week') targetDate.setDate(targetDate.getDate() + 7);
             else {
                 // Find next weekday
@@ -1861,51 +1918,62 @@ app.event('message', async ({ event, client }) => {
             const isoDate = targetDate.toISOString().split('T')[0];
             r.eta = isoDate;
             r.etaNotified = false;
-            console.log(`🎯 Adaptive ETA set to ${isoDate} for reminder ${r.id}`);
+            feedbackMsg = `🎯 *Sync:* I've set your target date to *${isoDate}* and paused earlier nudges!`;
             adapted = true;
         }
 
-        // B. Frequency Detection (Every \d+ hours)
-        const freqMatch = text.match(/remind me every (\d+) (hour|day|minute)s?/i);
-        if (freqMatch) {
-            const val = parseInt(freqMatch[1]);
-            const unit = freqMatch[2].toLowerCase();
-            let minutes = val;
-            if (unit === 'hour') minutes = val * 60;
-            else if (unit === 'day') minutes = val * 1440;
-            
-            r.frequencyMinutes = minutes;
-            console.log(`⏲️ Adaptive Frequency set to ${minutes}m for reminder ${r.id}`);
-            adapted = true;
+        // B. Ambiguity Support: "later" or "snooze"
+        if (/\b(later|snooze|busy|away)\b/i.test(text) && !adapted) {
+            try {
+                await client.chat.postEphemeral({
+                    channel: event.channel,
+                    user: event.user,
+                    thread_ts: event.thread_ts,
+                    text: "Snooze these reminders?",
+                    blocks: [
+                        { type: "section", text: { type: "mrkdwn", text: "🕒 *I heard 'later'!* Should I snooze these reminders for a bit?" } },
+                        {
+                            type: "actions",
+                            elements: [
+                                { type: "button", text: { type: "plain_text", text: "For 4h" }, action_id: "open_eta_modal", value: r.id },
+                                { type: "button", text: { type: "plain_text", text: "Until Tomorrow" }, action_id: "pause_reminders", value: r.id },
+                                { type: "button", text: { type: "plain_text", text: "Ignore" }, action_id: "ignore_suggestion" }
+                            ]
+                        }
+                    ]
+                });
+            } catch (e) { console.error('Ambiguity check failed', e); }
         }
 
         // C. Visual Confirmation & Sync
         if (adapted) {
             try {
-                // React to show "I heard you"
-                await client.reactions.add({
+                // VISIBLE THREAD REPLY (Previously Ephemeral)
+                await client.chat.postMessage({
                     channel: event.channel,
-                    timestamp: event.ts,
-                    name: 'mantelpiece_clock'
-                });
-
-                // Send ephemeral for clarity
-                await client.chat.postEphemeral({
-                    channel: event.channel,
-                    user: event.user,
                     thread_ts: event.thread_ts,
-                    text: `🤖 *Adaptive Sync:* I've adjusted your reminder schedule based on your update. Keep it up!`
+                    text: feedbackMsg,
+                    blocks: [
+                        {
+                            type: "section",
+                            text: { type: "mrkdwn", text: feedbackMsg },
+                            accessory: {
+                                type: "button",
+                                text: { type: "plain_text", text: "Undo ↩️" },
+                                action_id: "open_eta_modal",
+                                value: r.id
+                            }
+                        }
+                    ]
                 });
-            } catch (e) {
-                console.error('Feedback failed', e);
-            }
+            } catch (e) { console.error('Feedback failed', e); }
         }
     }
 
     // 3. Smart Suggestion: Done/Fixed/Waiting check
     if (isAssignee && event.text) {
         const text = event.text.toLowerCase();
-        
+
         // A. Done detection
         if (/\b(done|fixed|resolved|completed|closed)\b/i.test(text)) {
             try {
