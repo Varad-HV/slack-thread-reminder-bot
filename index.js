@@ -150,6 +150,36 @@ const app = new App({
     appToken: process.env.SLACK_APP_TOKEN
 });
 
+// 👤 USER NAME CACHE: Avoid hitting Slack API rate limits
+const userCache = new Map();
+const resolveUserNames = async (userIds, client) => {
+    const map = {};
+    for (const id of [...new Set(userIds)]) {
+        if (!id || id === 'Bot') {
+            map[id] = 'Assistant';
+            continue;
+        }
+        if (userCache.has(id)) {
+            map[id] = userCache.get(id);
+            continue;
+        }
+        try {
+            const info = await client.users.info({ user: id });
+            if (info.ok) {
+                const name = info.user.real_name || info.user.name;
+                userCache.set(id, name);
+                map[id] = name;
+            } else {
+                map[id] = 'Member';
+            }
+        } catch (e) {
+            console.error(`Name resolve fail for ${id}:`, e.message);
+            map[id] = 'Member';
+        }
+    }
+    return map;
+};
+
 // ---------------------------
 // 2. Logic & Formatting Brains
 // ---------------------------
@@ -210,7 +240,7 @@ const getDiverseGreeting = (user, pingCount = 0) => {
 /**
  * 🛡️ PRIVACY SCRUBBER: Removes PII before sending to AI
  */
-const anonymizeThread = (messages) => {
+const anonymizeThread = (messages, idToNameMap = {}) => {
     // 🛠️ Filter out automated bot noise and boilerplate
     const humanMessages = messages.filter(m => {
         const text = m.text || '';
@@ -232,14 +262,20 @@ const anonymizeThread = (messages) => {
             // ✂️ Strip standard Greetings
             text = text.replace(/^Hi <@U[A-Z0-9]+>.*?\n\n/s, '');
             
-            // 🔒 Redact PII
-            text = text.replace(/<@U[A-Z0-9]+>/g, '[Member]');
+            // 🔒 Replace Mentions with Resolved Names
+            text = text.replace(/<@U[A-Z0-9]+>/g, (match) => {
+                const id = match.slice(2, -1);
+                return idToNameMap[id] ? `[${idToNameMap[id]}]` : '[Member]';
+            });
+            
+            // Scrub other PII
             text = text.replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g, '[Email]');
             text = text.replace(/https?:\/\/\S+/g, '[Link]');
             
-            // 👤 Identify Speaker
-            const speaker = m.user === 'U07FPT7RN7K' ? 'Bot' : (m.user || 'User');
-            return `[${speaker}]: ${text.trim()}`;
+            // 👤 Identify Speaker by Name
+            const speakerId = m.user;
+            const speakerName = speakerId === 'U07FPT7RN7K' ? 'Bot' : (idToNameMap[speakerId] || 'Member');
+            return `[${speakerName}]: ${text.trim()}`;
         })
         .filter(msg => msg.split(']: ')[1]?.length > 2) // Ignore nearly empty messages
         .join('\n');
@@ -668,7 +704,9 @@ const sendDashboardAndCSV = async (userId, offsetMs = 0) => {
                     });
                     const humanMessages = threadResp.messages.filter(m => !m.bot_id && !m.service_type);
                     if (humanMessages.length > 0) {
-                        const cleanText = anonymizeThread(humanMessages);
+                        const participantIds = humanMessages.map(m => m.user);
+                        const idToNameMap = await resolveUserNames(participantIds, app.client);
+                        const cleanText = anonymizeThread(humanMessages, idToNameMap);
                         const suggestion = await getAISuggestion(cleanText);
                         if (suggestion && !suggestion.includes('No immediate action')) {
                             blocks.push({ type: "divider" });
@@ -1807,7 +1845,8 @@ app.action('request_thread_recap', async ({ ack, body, action, client }) => {
         let aiSummary = null;
         const hfToken = process.env.HUGGINGFACE_API_KEY;
         if (hfToken && humanMessages.length > 0) {
-            const cleanText = anonymizeThread(humanMessages);
+            const idToNameMap = await resolveUserNames(participantIds, client);
+            const cleanText = anonymizeThread(humanMessages, idToNameMap);
             aiSummary = await getHFSummary(cleanText);
         }
 
