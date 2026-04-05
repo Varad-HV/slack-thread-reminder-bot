@@ -208,31 +208,37 @@ const getDiverseGreeting = (user, pingCount = 0) => {
  */
 const getGoogleAuth = () => {
     let credentials;
-    let rawJson = process.env.GOOGLE_CREDENTIALS_JSON;
+    let rawJson = (process.env.GOOGLE_CREDENTIALS_JSON || '').trim();
 
-    // 1. Smart Parser: Detect and fix common misformatting (escaped quotes, etc.)
     if (rawJson) {
-        try {
-            // Test standard parsing
-            credentials = JSON.parse(rawJson);
-        } catch (e) {
-            console.warn('⚠️ Standard JSON.parse failed, attempting Smart Cleanup...');
+        // 🛡️ RECURSIVE DECODER: Handles double/triple-encoded JSON common on Render/Heroku
+        let current = rawJson;
+        let attempts = 0;
+        while (typeof current === 'string' && attempts < 5) {
             try {
-                // Remove extra backslashes before quotes, or unescape if double-encoded
-                let cleaned = rawJson
-                    .replace(/\\"/g, '"')    // Unescape quotes
-                    .replace(/\\n/g, '\n')   // Fix literal \n
-                    .replace(/\\\\/g, '\\'); // Fix double backslashes
-                
-                // If it starts/ends with extra quotes, strip them (sometimes happens with env vars)
-                if (cleaned.startsWith('"') && cleaned.endsWith('"')) {
-                    cleaned = cleaned.substring(1, cleaned.length - 1);
+                const parsed = JSON.parse(current);
+                if (parsed && typeof parsed === 'object') {
+                    credentials = parsed;
+                    break;
                 }
-                
-                credentials = JSON.parse(cleaned);
-                console.log('✅ Smart Parser successfully recovered Google Credentials!');
-            } catch (smartError) {
-                throw new Error(`Failed to parse GOOGLE_CREDENTIALS_JSON even with Smart Parser: ${smartError.message}`);
+                current = parsed; // Keep unwrapping
+                attempts++;
+            } catch (e) {
+                // If it fails, try a aggressive cleanup before one last attempt
+                try {
+                    // Remove wrapping quotes if they exist and try one last time
+                    if (current.startsWith('"') && current.endsWith('"')) {
+                        current = current.substring(1, current.length - 1);
+                        continue;
+                    }
+                    // Handle escaped quotes from manual copy-paste
+                    current = current.replace(/\\"/g, '"').replace(/\\n/g, '\n');
+                    const lastTry = JSON.parse(current);
+                    if (lastTry && typeof lastTry === 'object') credentials = lastTry;
+                } catch (inner) {
+                    throw new Error(`Failed to parse GOOGLE_CREDENTIALS_JSON: ${inner.message}. Position: ${inner.at || 'unknown'}`);
+                }
+                break;
             }
         }
     } else {
@@ -246,29 +252,32 @@ const getGoogleAuth = () => {
         throw new Error('Google credentials missing. Set GOOGLE_CREDENTIALS_JSON env var or add google-credentials.json to root.');
     }
 
-    // 🛡️ NUCLEAR HEALER: Reconstruct the private key to fix any formatting/newline issues
+    // 🛡️ PRIVATE KEY HEALER: Ensure the PEM format is strictly followed
     try {
         if (credentials.private_key) {
-            // Extract raw base64 data (ignoring all junk/newlines)
-            const b64Body = credentials.private_key
-                .replace(/-----BEGIN PRIVATE KEY-----/, '')
-                .replace(/-----END PRIVATE KEY-----/, '')
-                .replace(/\\n/g, '')   // Remove literal \n strings
-                .replace(/\s/g, '');   // Remove all whitespace
+            // First, fix literal \n strings which are common in JSON env vars
+            let key = credentials.private_key.replace(/\\n/g, '\n');
 
-            const derBuffer = Buffer.from(b64Body, 'base64');
-            const privateKey = crypto.createPrivateKey({
-                key: derBuffer,
-                format: 'der',
-                type: 'pkcs8'
-            });
-            credentials.private_key = privateKey.export({
-                format: 'pem',
-                type: 'pkcs8'
-            });
+            // If it's already a proper PEM, just normalize line endings
+            if (key.includes('-----BEGIN PRIVATE KEY-----')) {
+                credentials.private_key = key.trim() + '\n';
+            } else {
+                // Nuclear DER-to-PEM conversion if it's just a raw base64 string
+                const b64Body = key.replace(/\s/g, ''); // Remove all whitespace
+                const derBuffer = Buffer.from(b64Body, 'base64');
+                const privateKey = crypto.createPrivateKey({
+                    key: derBuffer,
+                    format: 'der',
+                    type: 'pkcs8'
+                });
+                credentials.private_key = privateKey.export({
+                    format: 'pem',
+                    type: 'pkcs8'
+                });
+            }
         }
     } catch (healError) {
-        console.warn('⚠️ Google Key Healer encountered an issue (non-critical if key is already perfect):', healError.message);
+        console.warn('⚠️ Google Key Healer issue (likely okay if key is already PEM):', healError.message);
     }
 
     return new google.auth.GoogleAuth({
@@ -561,9 +570,15 @@ const sendDashboardAndCSV = async (userId, offsetMs = 0) => {
                         });
                     } catch (sheetErr) {
                         console.error("Personal Sheet Fail", sheetErr);
-                        await app.client.chat.postMessage({
-                            channel: channelId,
-                            text: `⚠️ *Google Sheet Error:* I couldn't generate your export link.\n*Reason:* ${sheetErr.message}`
+                        // SILENT FALLBACK: If Sheets fail, automatically send the CSV for admins too
+                        const csvContent = jsonToCsv(reportData.headers, reportData.rows);
+                        const fileName = `JiraPing_Report_${new Date().toISOString().split('T')[0]}.csv`;
+                        await app.client.files.uploadV2({
+                            channel_id: channelId,
+                            content: csvContent,
+                            filename: fileName,
+                            title: 'Your Jira Follow-up Report',
+                            initial_comment: "📊 *Note:* Google Sheets is currently unavailable. Falling back to CSV file for your report."
                         });
                     }
                 } else {
@@ -743,9 +758,15 @@ const sendAdminDashboard = async () => {
                             });
                         } catch (adminSheetErr) {
                             console.error("Admin Sheet Fail", adminSheetErr);
-                            await app.client.chat.postMessage({
-                                channel: dm.channel.id,
-                                text: `⚠️ *Admin Sheet Error:* I couldn't generate the export link.\n*Reason:* ${adminSheetErr.message}`
+                            // SILENT FALLBACK: If Sheets fail, automatically send the CSV for admins too
+                            const csvContent = jsonToCsv(adminReportData.headers, adminReportData.rows);
+                            const fileName = `JiraPing_Admin_Summary_${new Date().toISOString().split('T')[0]}.csv`;
+                            await app.client.files.uploadV2({
+                                channel_id: dm.channel.id,
+                                content: csvContent,
+                                filename: fileName,
+                                title: 'Admin Master Summary Report',
+                                initial_comment: "📊 *Note:* Master Google Sheet is currently unavailable. Falling back to CSV file for your admin summary."
                             });
                         }
                     }
@@ -938,7 +959,7 @@ const generateAdminReportData = (metrics, escalations) => {
 app.shortcut('set_thread_reminder', async ({ shortcut, ack, client }) => {
     await ack();
     const channel = (shortcut.channel?.id || shortcut.message?.channel?.id);
-    const thread_ts = (shortcut.message?.ts || shortcut.shortcut_ts);
+    const thread_ts = (shortcut.message?.thread_ts || shortcut.message?.ts || shortcut.shortcut_ts);
 
     await client.views.open({
         trigger_id: shortcut.trigger_id,
@@ -1792,11 +1813,17 @@ app.view('submit_report', async ({ ack, body, view, client }) => {
 // --- Conversation-Aware Intelligence (The Observer) ---
 
 app.event('message', async ({ event, client }) => {
+    // 🔍 Debug: Log event properties
+    console.log(`💬 Message received | user: ${event.user} | channel: ${event.channel} | thread_ts: ${event.thread_ts} | ts: ${event.ts}`);
+
     // Only care about thread replies
     if (!event.thread_ts) return;
 
     const r = reminders.find(rem => rem.thread_ts === event.thread_ts && rem.active);
-    if (!r) return;
+    if (!r) {
+        console.log(`❌ No active reminder found for thread_ts: ${event.thread_ts}`);
+        return;
+    }
 
     // 1. Update activity timestamps
     const now = new Date();
@@ -1876,29 +1903,53 @@ app.event('message', async ({ event, client }) => {
         }
     }
 
-    // 3. Smart Suggestion: Done/Fixed check
-    if (isAssignee && event.text && /\b(done|fixed|resolved|completed|closed)\b/i.test(event.text)) {
-        try {
-            await client.chat.postEphemeral({
-                channel: event.channel,
-                user: event.user,
-                thread_ts: event.thread_ts,
-                text: "I see you mentioned this might be done! Should I mark it as resolved?",
-                blocks: [
-                    {
-                        type: "section",
-                        text: { type: "mrkdwn", text: "✨ *Detected completion!* Should I stop tracking this reminder?" }
-                    },
-                    {
-                        type: "actions",
-                        elements: [
-                            { type: "button", text: { type: "plain_text", text: "Yes, Resolve! ✅" }, action_id: "stop_reminder", value: r.id, style: "primary" },
-                            { type: "button", text: { type: "plain_text", text: "No, ignore" }, action_id: "ignore_suggestion" }
-                        ]
-                    }
-                ]
-            });
-        } catch (e) { console.error('Suggestion failed', e); }
+    // 3. Smart Suggestion: Done/Fixed/Waiting check
+    if (isAssignee && event.text) {
+        const text = event.text.toLowerCase();
+        
+        // A. Done detection
+        if (/\b(done|fixed|resolved|completed|closed)\b/i.test(text)) {
+            try {
+                await client.chat.postEphemeral({
+                    channel: event.channel,
+                    user: event.user,
+                    thread_ts: event.thread_ts,
+                    text: "I see you mentioned this might be done! Should I mark it as resolved?",
+                    blocks: [
+                        { type: "section", text: { type: "mrkdwn", text: "✨ *Detected completion!* Should I stop tracking this reminder?" } },
+                        {
+                            type: "actions",
+                            elements: [
+                                { type: "button", text: { type: "plain_text", text: "Yes, Resolve! ✅" }, action_id: "stop_reminder", value: r.id, style: "primary" },
+                                { type: "button", text: { type: "plain_text", text: "No, ignore" }, action_id: "ignore_suggestion" }
+                            ]
+                        }
+                    ]
+                });
+            } catch (e) { console.error('Suggestion failed', e); }
+        }
+
+        // B. Blocker/Waiting detection
+        if (/\b(waiting|stuck|blocked|pending|dependency)\b/i.test(text)) {
+            try {
+                await client.chat.postEphemeral({
+                    channel: event.channel,
+                    user: event.user,
+                    thread_ts: event.thread_ts,
+                    text: "Need to pause nudges?",
+                    blocks: [
+                        { type: "section", text: { type: "mrkdwn", text: "⏸️ *I see you might be blocked.* Should I pause these reminders until you're ready?" } },
+                        {
+                            type: "actions",
+                            elements: [
+                                { type: "button", text: { type: "plain_text", text: "Pause Nudges ⏸️" }, action_id: "open_blocker_modal", value: r.id, style: "danger" },
+                                { type: "button", text: { type: "plain_text", text: "Keep Pinging" }, action_id: "ignore_suggestion" }
+                            ]
+                        }
+                    ]
+                });
+            } catch (e) { console.error('Blocker suggestion failed', e); }
+        }
     }
 
     saveToDb(reminders);
