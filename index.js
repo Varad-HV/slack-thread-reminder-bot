@@ -206,6 +206,52 @@ const getDiverseGreeting = (user, pingCount = 0) => {
 /**
  * GOOGLE SHEETS SERVICE
  */
+/**
+ * 🛡️ PRIVACY SCRUBBER: Removes PII before sending to AI
+ */
+const anonymizeThread = (messages) => {
+    return messages.map(m => {
+        let text = m.text || '';
+        // 1. Redact Slack IDs: <@U12345> -> [Member]
+        text = text.replace(/<@U[A-Z0-9]+>/g, '[Team Member]');
+        // 2. Redact Emails
+        text = text.replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g, '[Email]');
+        // 3. Redact Links (optional but safer)
+        text = text.replace(/https?:\/\/\S+/g, '[Link]');
+        return text;
+    }).join('\n');
+};
+
+/**
+ * 🧠 AI ENGINE: Hugging Face Inference
+ */
+const getHFSummary = async (rawText) => {
+    const token = process.env.HUGGINGFACE_API_KEY;
+    if (!token) return null;
+
+    try {
+        const response = await axios.post(
+            "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2",
+            {
+                inputs: `<s>[INST] You are a professional project manager. Summarize the following Slack thread into a concise status report for a manager. Highlight the current goal, progress made, and any unresolved blockers. Keep it under 150 words. \n\nTHREAD:\n${rawText} [/INST]`,
+                parameters: { max_new_tokens: 500, temperature: 0.7 }
+            },
+            { headers: { Authorization: `Bearer ${token}` } }
+        );
+
+        if (Array.isArray(response.data) && response.data[0]?.generated_text) {
+            // Remove the prompt from the response if the model includes it
+            const fullText = response.data[0].generated_text;
+            const summary = fullText.split('[/INST]').pop().trim();
+            return summary;
+        }
+        return null;
+    } catch (e) {
+        console.error('AI Summary Engine Fail:', e.response?.data || e.message);
+        return null;
+    }
+};
+
 const getGoogleAuth = () => {
     let credentials;
     let rawJson = (process.env.GOOGLE_CREDENTIALS_JSON || '').trim();
@@ -1628,46 +1674,74 @@ app.action('request_thread_recap', async ({ ack, body, action, client }) => {
         const replies = await client.conversations.replies({
             channel: r.channel,
             ts: r.thread_ts,
-            limit: 15
+            limit: 20
         });
 
-        const messages = replies.messages || [];
-        const lastMsg = messages[messages.length - 1];
-        const participants = [...new Set(messages.map(m => `<@${m.user}>`))].join(', ');
+        const allMessages = replies.messages || [];
+        
+        // 🧠 INTELLIGENT FILTERING: Ignore bot's own noise
+        const humanMessages = allMessages.filter(m => !m.bot_id && m.user && m.text);
+        const latestHumanMsg = humanMessages[humanMessages.length - 1] || { text: 'No updates yet', user: r.assignee };
+        const participantIds = [...new Set(humanMessages.map(m => m.user))];
+        const participants = participantIds.length > 0 
+            ? participantIds.map(id => `<@${id}>`).join(', ') 
+            : `<@${r.assignee}>`;
 
-        let statusDesc = `*Status:* ${r.status}`;
-        if (r.eta) statusDesc += ` (Target: ${r.eta})`;
-        if (r.status === 'BLOCKED') statusDesc += `\n*Blocker:* ${r.blockerReason}`;
+        // 📑 SYNTHESIZE EXECUTIVE SUMMARY
+        let execSummary = `<@${r.assignee}> is actively working on "${r.note}". `;
+        if (r.status === 'BLOCKED') {
+            execSummary = `🚨 *ATTENTION:* Progress on "${r.note}" is currently *STALLED* due to: ${r.blockerReason}.`;
+        } else if (r.eta) {
+            execSummary += `Currently on track for the target date of *${r.eta}*.`;
+        } else {
+            execSummary += `The latest update suggests steady progress is being made.`;
+        }
+
+        // 🤯 REAL AI SUMMARY (Privacy-First)
+        let aiSummary = null;
+        const hfToken = process.env.HUGGINGFACE_API_KEY;
+        if (hfToken && humanMessages.length > 0) {
+            const cleanText = anonymizeThread(humanMessages);
+            aiSummary = await getHFSummary(cleanText);
+        }
+
+        let statusText = `*${r.status}*`;
+        if (r.eta) statusText += ` (Target: ${r.eta})`;
 
         await client.chat.postEphemeral({
             channel: body.channel.id,
             user: body.user.id,
             thread_ts: body.container.thread_ts || r.thread_ts,
-            text: `🧵 *Thread Recap*`,
+            text: `🧵 Thread Recap: ${r.note}`,
             blocks: [
                 {
                     type: "section",
                     text: {
                         type: "mrkdwn",
-                        text: `*🧵 Thread Recap for "${r.note}"*\n\n` +
-                              `🎯 *Original Goal:* ${r.note}\n` +
-                              `🚦 ${statusDesc}\n` +
-                              `👥 *Participants:* ${participants}\n` +
-                              `💬 *Last Update:* "${lastMsg.text.substring(0, 100)}${lastMsg.text.length > 100 ? '...' : ''}"`
+                        text: `*🧵 Thread Synthesis:* ${r.note}\n\n` +
+                              (aiSummary || latestHumanMsg.text.substring(0, 200)) + 
+                              `\n\n*Status Note:* ${execSummary}`
                     }
                 },
                 {
                     type: "context",
-                    elements: [{ type: "mrkdwn", text: "This summary is private and visible only to you." }]
+                    elements: [{ type: "mrkdwn", text: "🛡️ _Privacy-Scrubbed (IDs/Emails removed before AI processing)_" }]
                 }
             ]
         });
     } catch (e) {
         console.error('Recap failed', e);
+        let errorMsg = "⚠️ Sorry, I couldn't generate a recap right now. Check my permissions or try again later.";
+        
+        if (e.data?.error === 'not_in_channel') {
+            errorMsg = "⚠️ *I'm not in this channel!* Please invite me by typing `/invite @JiraPing` so I can read the thread context for your recap.";
+        }
+
         await client.chat.postEphemeral({
             channel: body.channel.id,
             user: body.user.id,
-            text: "⚠️ Sorry, I couldn't generate a recap right now. Check my permissions or try again later."
+            thread_ts: body.container.thread_ts || r.thread_ts,
+            text: errorMsg
         });
     }
 });
